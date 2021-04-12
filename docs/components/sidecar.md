@@ -79,7 +79,7 @@ To use this, the Prometheus compaction needs to be disabled. This can be done by
 ```$
 usage: thanos sidecar [<flags>]
 
-Sidecar for Prometheus server
+Sidecar for Prometheus server.
 
 Flags:
   -h, --help                     Show context-sensitive help (also try
@@ -156,6 +156,12 @@ Flags:
                                  Works only if compaction is disabled on
                                  Prometheus. Do it once and then disable the
                                  flag when done.
+      --hash-func=               Specify which hash function to use when
+                                 calculating the hashes of produced files. If no
+                                 function has been specified, it does not
+                                 happen. This permits avoiding downloading some
+                                 files twice albeit at some performance cost.
+                                 Possible values are: "", "SHA256".
       --min-time=0000-01-01T00:00:00Z
                                  Start of time range limit to serve. Thanos
                                  sidecar will serve only metrics, which happened

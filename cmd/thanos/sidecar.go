@@ -27,6 +27,7 @@ import (
 	"github.com/thanos-io/thanos/pkg/extkingpin"
 	"github.com/thanos-io/thanos/pkg/extprom"
 	thanoshttp "github.com/thanos-io/thanos/pkg/http"
+	meta "github.com/thanos-io/thanos/pkg/metadata"
 	thanosmodel "github.com/thanos-io/thanos/pkg/model"
 	"github.com/thanos-io/thanos/pkg/objstore/client"
 	"github.com/thanos-io/thanos/pkg/prober"
@@ -43,7 +44,7 @@ import (
 )
 
 func registerSidecar(app *extkingpin.App) {
-	cmd := app.Command(component.Sidecar.String(), "Sidecar for Prometheus server")
+	cmd := app.Command(component.Sidecar.String(), "Sidecar for Prometheus server.")
 	conf := &sidecarConfig{}
 	conf.registerFlag(cmd)
 	cmd.Setup(func(g *run.Group, logger log.Logger, reg *prometheus.Registry, tracer opentracing.Tracer, _ <-chan struct{}, _ bool) error {
@@ -218,6 +219,7 @@ func runSidecar(
 		s := grpcserver.New(logger, reg, tracer, comp, grpcProbe,
 			grpcserver.WithServer(store.RegisterStoreServer(promStore)),
 			grpcserver.WithServer(rules.RegisterRulesServer(rules.NewPrometheus(conf.prometheus.url, c, m.Labels))),
+			grpcserver.WithServer(meta.RegisterMetadataServer(meta.NewPrometheus(conf.prometheus.url, c))),
 			grpcserver.WithListen(conf.grpc.bindAddress),
 			grpcserver.WithGracePeriod(time.Duration(conf.grpc.gracePeriod)),
 			grpcserver.WithTLSConfig(tlsCfg),
@@ -268,7 +270,7 @@ func runSidecar(
 			}
 
 			s := shipper.New(logger, reg, conf.tsdb.path, bkt, m.Labels, metadata.SidecarSource,
-				conf.shipper.uploadCompacted, conf.shipper.allowOutOfOrderUpload)
+				conf.shipper.uploadCompacted, conf.shipper.allowOutOfOrderUpload, metadata.HashFunc(conf.shipper.hashFunc))
 
 			return runutil.Repeat(30*time.Second, ctx.Done(), func() error {
 				if uploaded, err := s.Sync(ctx); err != nil {

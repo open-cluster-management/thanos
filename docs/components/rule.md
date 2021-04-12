@@ -232,8 +232,8 @@ Full relabelling is planned to be done in future and is tracked here: https://gi
 ```$
 usage: thanos rule [<flags>]
 
-ruler evaluating Prometheus rules against given Query nodes, exposing Store API
-and storing old blocks in bucket
+Ruler evaluating Prometheus rules against given Query nodes, exposing Store API
+and storing old blocks in bucket.
 
 Flags:
   -h, --help                     Show context-sensitive help (also try
@@ -394,6 +394,12 @@ Flags:
                                  Interval between DNS resolutions.
       --query.http-method=POST   HTTP method to use when sending queries.
                                  Possible options: [GET, POST]
+      --hash-func=               Specify which hash function to use when
+                                 calculating the hashes of produced files. If no
+                                 function has been specified, it does not
+                                 happen. This permits avoiding downloading some
+                                 files twice albeit at some performance cost.
+                                 Possible values are: "", "SHA256".
 
 ```
 

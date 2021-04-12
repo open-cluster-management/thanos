@@ -129,7 +129,7 @@ Flags:
                                  TLS CA Certificates to use to verify servers.
       --remote-write.client-server-name=""
                                  Server name to verify the hostname on the
-                                 returned gRPC certificates. See
+                                 returned TLS certificates. See
                                  https://tools.ietf.org/html/rfc4366#section-3.1
       --tsdb.path="./data"       Data directory of TSDB.
       --label=key="value" ...    External labels to announce. This flag will be
@@ -178,9 +178,18 @@ Flags:
       --receive.replication-factor=1
                                  How many times to replicate incoming write
                                  requests.
+      --tsdb.allow-overlapping-blocks
+                                 Allow overlapping blocks, which in turn enables
+                                 vertical compaction and vertical query merge.
       --tsdb.wal-compression     Compress the tsdb WAL.
       --tsdb.no-lockfile         Do not create lockfile in TSDB data directory.
                                  In any case, the lockfiles will be deleted on
                                  next startup.
+      --hash-func=               Specify which hash function to use when
+                                 calculating the hashes of produced files. If no
+                                 function has been specified, it does not
+                                 happen. This permits avoiding downloading some
+                                 files twice albeit at some performance cost.
+                                 Possible values are: "", "SHA256".
 
 ```
