@@ -13,7 +13,7 @@ arch = $(shell uname -m)
 # Update at 2020.2.01
 ifeq ($(arch), x86_64)
     # amd64
-    SHA="14d68ca3d69fceaa6224250c83d81d935c053fb13594c811038c461194599973"
+    SHA="de4af55df1f648a334e16437c550a2907e0aed4f0b0edf454b0b215a9349bdbb"
 else ifeq ($(arch), armv8)
     # arm64
     SHA="4dd2d3bba195563e6cb2b286f23dc832d0fda6c6662e6de2e86df454094b44d8"
