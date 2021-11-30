@@ -744,6 +744,7 @@ func queryFuncCreator(
 						// TODO(bwplotka): Propagate those to UI, probably requires changing rule manager code ):
 						level.Warn(logger).Log("warnings", strings.Join(warns, ", "), "query", q)
 					}
+					level.Info(logger).Log("query", q, "queryResult === ", v)
 					return v, nil
 				}
 			}
