@@ -1,4 +1,4 @@
-FROM registry.ci.openshift.org/open-cluster-management/builder:go1.16-linux AS builder
+FROM registry.ci.openshift.org/open-cluster-management/builder:go1.17-linux AS builder
 
 WORKDIR $GOPATH/src/github.com/thanos-io/thanos
 # Change in the docker context invalidates the cache so to leverage docker
