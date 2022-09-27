@@ -14,10 +14,10 @@ arch = $(shell uname -m)
 # Update at 2021.6.07
 ifeq ($(arch), x86_64)
     # amd64
-    BASE_DOCKER_SHA="5a5e9bc024fd0d76b82044da8ca14035d096da2c24935e10543061ea95a38434"
+    BASE_DOCKER_SHA="d8d3654786836cad8c09543704807c7a6d75de53b9e9cd21a1bbd8cb1a607004"
 else ifeq ($(arch), armv8)
     # arm64
-    BASE_DOCKER_SHA="581ed52de050e5002b9824ae82819b218702af5dfcfbdab51a709a8136960d5f"
+    BASE_DOCKER_SHA="a3435ee186dbf88238388c112761488ecd2c264dbff8957ab73f804be62a9080"
 else
     echo >&2 "only support amd64 or arm64 arch" && exit 1
 endif
