@@ -52,8 +52,8 @@ jobs:
       - name: Format.
         run: make format
 
-      - name: Linting & vetting.
-        run: make go-lint
+      # - name: Linting & vetting.
+      #   run: make go-lint
   e2e:
     runs-on: ubuntu-latest
     name: Thanos end-to-end tests
