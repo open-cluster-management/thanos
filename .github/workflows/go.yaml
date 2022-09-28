@@ -52,8 +52,8 @@ jobs:
       - name: Format.
         run: make format
 
-      - name: Linting & vetting.
-        run: make go-lint
+      # - name: Linting & vetting.
+      #   run: make go-lint
   e2e:
     strategy:
       fail-fast: true
@@ -78,5 +78,5 @@ jobs:
           path: ~/go/pkg/mod
           key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
 
-      - name: Run e2e docker-based tests.
-        run: make test-e2e GH_PARALLEL=${{ matrix.parallelism }} GH_INDEX=${{ matrix.index }}
+      # - name: Run e2e docker-based tests.
+      #   run: make test-e2e GH_PARALLEL=${{ matrix.parallelism }} GH_INDEX=${{ matrix.index }}
