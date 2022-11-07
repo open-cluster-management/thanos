@@ -5,8 +5,6 @@ package indexheader
 
 import (
 	"context"
-	"io/ioutil"
-	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -14,10 +12,10 @@ import (
 	"github.com/go-kit/log"
 	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/prometheus/prometheus/model/labels"
+	"github.com/thanos-io/objstore/providers/filesystem"
 
 	"github.com/thanos-io/thanos/pkg/block"
 	"github.com/thanos-io/thanos/pkg/block/metadata"
-	"github.com/thanos-io/thanos/pkg/objstore/filesystem"
 	"github.com/thanos-io/thanos/pkg/testutil"
 	"github.com/thanos-io/thanos/pkg/testutil/e2eutil"
 )
@@ -42,9 +40,7 @@ func TestReaderPool_NewBinaryReader(t *testing.T) {
 
 	ctx := context.Background()
 
-	tmpDir, err := ioutil.TempDir("", "test-indexheader")
-	testutil.Ok(t, err)
-	defer func() { testutil.Ok(t, os.RemoveAll(tmpDir)) }()
+	tmpDir := t.TempDir()
 
 	bkt, err := filesystem.NewBucket(filepath.Join(tmpDir, "bkt"))
 	testutil.Ok(t, err)
@@ -80,9 +76,7 @@ func TestReaderPool_ShouldCloseIdleLazyReaders(t *testing.T) {
 
 	ctx := context.Background()
 
-	tmpDir, err := ioutil.TempDir("", "test-indexheader")
-	testutil.Ok(t, err)
-	defer func() { testutil.Ok(t, os.RemoveAll(tmpDir)) }()
+	tmpDir := t.TempDir()
 
 	bkt, err := filesystem.NewBucket(filepath.Join(tmpDir, "bkt"))
 	testutil.Ok(t, err)

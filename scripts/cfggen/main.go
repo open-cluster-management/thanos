@@ -15,6 +15,15 @@ import (
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
 	"github.com/pkg/errors"
+	"github.com/thanos-io/objstore/client"
+	"github.com/thanos-io/objstore/providers/azure"
+	"github.com/thanos-io/objstore/providers/bos"
+	"github.com/thanos-io/objstore/providers/cos"
+	"github.com/thanos-io/objstore/providers/filesystem"
+	"github.com/thanos-io/objstore/providers/gcs"
+	"github.com/thanos-io/objstore/providers/oss"
+	"github.com/thanos-io/objstore/providers/s3"
+	"github.com/thanos-io/objstore/providers/swift"
 	"gopkg.in/alecthomas/kingpin.v2"
 	"gopkg.in/yaml.v2"
 
@@ -23,22 +32,14 @@ import (
 	"github.com/thanos-io/thanos/pkg/alert"
 	"github.com/thanos-io/thanos/pkg/cacheutil"
 	"github.com/thanos-io/thanos/pkg/logging"
-	"github.com/thanos-io/thanos/pkg/objstore/azure"
-	"github.com/thanos-io/thanos/pkg/objstore/bos"
-	"github.com/thanos-io/thanos/pkg/objstore/client"
-	"github.com/thanos-io/thanos/pkg/objstore/cos"
-	"github.com/thanos-io/thanos/pkg/objstore/filesystem"
-	"github.com/thanos-io/thanos/pkg/objstore/gcs"
-	"github.com/thanos-io/thanos/pkg/objstore/oss"
-	"github.com/thanos-io/thanos/pkg/objstore/s3"
-	"github.com/thanos-io/thanos/pkg/objstore/swift"
 	"github.com/thanos-io/thanos/pkg/queryfrontend"
 	storecache "github.com/thanos-io/thanos/pkg/store/cache"
 	trclient "github.com/thanos-io/thanos/pkg/tracing/client"
 	"github.com/thanos-io/thanos/pkg/tracing/elasticapm"
+	"github.com/thanos-io/thanos/pkg/tracing/google_cloud"
 	"github.com/thanos-io/thanos/pkg/tracing/jaeger"
 	"github.com/thanos-io/thanos/pkg/tracing/lightstep"
-	"github.com/thanos-io/thanos/pkg/tracing/stackdriver"
+	"github.com/thanos-io/thanos/pkg/tracing/otlp"
 )
 
 var (
@@ -57,10 +58,11 @@ var (
 	}
 
 	tracingConfigs = map[trclient.TracingProvider]interface{}{
-		trclient.JAEGER:      jaeger.Config{},
-		trclient.STACKDRIVER: stackdriver.Config{},
-		trclient.ELASTIC_APM: elasticapm.Config{},
-		trclient.LIGHTSTEP:   lightstep.Config{},
+		trclient.OpenTelemetryProtocol: otlp.Config{},
+		trclient.Jaeger:                jaeger.Config{},
+		trclient.GoogleCloud:           google_cloud.Config{},
+		trclient.ElasticAPM:            elasticapm.Config{},
+		trclient.Lightstep:             lightstep.Config{},
 	}
 	indexCacheConfigs = map[storecache.IndexCacheProvider]interface{}{
 		storecache.INMEMORY:  storecache.InMemoryIndexCacheConfig{},

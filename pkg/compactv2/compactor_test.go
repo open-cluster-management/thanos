@@ -6,7 +6,6 @@ package compactv2
 import (
 	"bytes"
 	"context"
-	"io/ioutil"
 	"math"
 	"os"
 	"path/filepath"
@@ -589,9 +588,7 @@ func TestCompactor_WriteSeries_e2e(t *testing.T) {
 		},
 	} {
 		t.Run(tcase.name, func(t *testing.T) {
-			tmpDir, err := ioutil.TempDir("", "test-series-writer")
-			testutil.Ok(t, err)
-			defer func() { testutil.Ok(t, os.RemoveAll(tmpDir)) }()
+			tmpDir := t.TempDir()
 
 			chunkPool := chunkenc.NewPool()
 
@@ -672,7 +669,7 @@ func readBlockSeries(t *testing.T, bDir string) []seriesSamples {
 		testutil.Ok(t, indexr.Series(all.At(), &s.lset, &chks))
 
 		for _, c := range chks {
-			c.Chunk, err = chunkr.Chunk(c.Ref)
+			c.Chunk, err = chunkr.Chunk(c)
 			testutil.Ok(t, err)
 
 			var chk []sample

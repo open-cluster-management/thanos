@@ -9,7 +9,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"math"
 	"math/rand"
 	"os"
@@ -18,6 +17,7 @@ import (
 	"regexp"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -29,6 +29,8 @@ import (
 	"github.com/leanovate/gopter/gen"
 	"github.com/leanovate/gopter/prop"
 	"github.com/oklog/ulid"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	promtest "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/model/relabel"
@@ -38,14 +40,15 @@ import (
 	"github.com/prometheus/prometheus/tsdb/encoding"
 	"go.uber.org/atomic"
 
+	"github.com/thanos-io/objstore"
+	"github.com/thanos-io/objstore/providers/filesystem"
+
 	"github.com/thanos-io/thanos/pkg/block"
 	"github.com/thanos-io/thanos/pkg/block/indexheader"
 	"github.com/thanos-io/thanos/pkg/block/metadata"
 	"github.com/thanos-io/thanos/pkg/compact"
 	"github.com/thanos-io/thanos/pkg/compact/downsample"
 	"github.com/thanos-io/thanos/pkg/gate"
-	"github.com/thanos-io/thanos/pkg/objstore"
-	"github.com/thanos-io/thanos/pkg/objstore/filesystem"
 	"github.com/thanos-io/thanos/pkg/pool"
 	storecache "github.com/thanos-io/thanos/pkg/store/cache"
 	"github.com/thanos-io/thanos/pkg/store/hintspb"
@@ -188,12 +191,56 @@ func TestBucketBlock_Property(t *testing.T) {
 	properties.TestingRun(t)
 }
 
+func TestBucketFilterExtLabelsMatchers(t *testing.T) {
+	defer testutil.TolerantVerifyLeak(t)
+
+	dir := t.TempDir()
+	bkt, err := filesystem.NewBucket(dir)
+	testutil.Ok(t, err)
+	defer func() { testutil.Ok(t, bkt.Close()) }()
+
+	blockID := ulid.MustNew(1, nil)
+	meta := &metadata.Meta{
+		BlockMeta: tsdb.BlockMeta{ULID: blockID},
+		Thanos: metadata.Thanos{
+			Labels: map[string]string{
+				"a": "b",
+				"c": "d",
+			},
+		},
+	}
+	b, _ := newBucketBlock(context.Background(), log.NewNopLogger(), newBucketStoreMetrics(nil), meta, bkt, path.Join(dir, blockID.String()), nil, nil, nil, nil)
+	ms := []*labels.Matcher{
+		{Type: labels.MatchNotEqual, Name: "a", Value: "b"},
+	}
+	res, _ := b.FilterExtLabelsMatchers(ms)
+	testutil.Equals(t, len(res), 0)
+
+	ms = []*labels.Matcher{
+		{Type: labels.MatchNotEqual, Name: "a", Value: "a"},
+	}
+	_, ok := b.FilterExtLabelsMatchers(ms)
+	testutil.Equals(t, ok, false)
+
+	ms = []*labels.Matcher{
+		{Type: labels.MatchNotEqual, Name: "a", Value: "a"},
+		{Type: labels.MatchNotEqual, Name: "c", Value: "d"},
+	}
+	res, _ = b.FilterExtLabelsMatchers(ms)
+	testutil.Equals(t, len(res), 0)
+
+	ms = []*labels.Matcher{
+		{Type: labels.MatchNotEqual, Name: "a2", Value: "a"},
+	}
+	res, _ = b.FilterExtLabelsMatchers(ms)
+	testutil.Equals(t, len(res), 1)
+	testutil.Equals(t, res, ms)
+}
+
 func TestBucketBlock_matchLabels(t *testing.T) {
 	defer testutil.TolerantVerifyLeak(t)
 
-	dir, err := ioutil.TempDir("", "bucketblock-test")
-	testutil.Ok(t, err)
-	defer testutil.Ok(t, os.RemoveAll(dir))
+	dir := t.TempDir()
 
 	bkt, err := filesystem.NewBucket(dir)
 	testutil.Ok(t, err)
@@ -588,10 +635,7 @@ func TestBucketStore_Info(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	dir, err := ioutil.TempDir("", "bucketstore-test")
-	testutil.Ok(t, err)
-
-	defer testutil.Ok(t, os.RemoveAll(dir))
+	dir := t.TempDir()
 
 	chunkPool, err := NewDefaultChunkBytesPool(2e5)
 	testutil.Ok(t, err)
@@ -653,9 +697,7 @@ func TestBucketStore_Sharding(t *testing.T) {
 	ctx := context.Background()
 	logger := log.NewNopLogger()
 
-	dir, err := ioutil.TempDir("", "test-sharding-prepare")
-	testutil.Ok(t, err)
-	defer func() { testutil.Ok(t, os.RemoveAll(dir)) }()
+	dir := t.TempDir()
 
 	bkt := objstore.NewInMemBucket()
 	series := []labels.Labels{labels.FromStrings("a", "1", "b", "1")}
@@ -682,9 +724,7 @@ func TestBucketStore_Sharding(t *testing.T) {
 		return
 	}
 
-	dir2, err := ioutil.TempDir("", "test-sharding2")
-	testutil.Ok(t, err)
-	defer func() { testutil.Ok(t, os.RemoveAll(dir2)) }()
+	dir2 := t.TempDir()
 
 	t.Run("reuse_disk", func(t *testing.T) {
 		testSharding(t, dir2, bkt, id1, id2, id3, id4)
@@ -829,10 +869,7 @@ func testSharding(t *testing.T, reuseDisk string, bkt objstore.Bucket, all ...ul
 			dir := reuseDisk
 
 			if dir == "" {
-				var err error
-				dir, err = ioutil.TempDir("", "test-sharding")
-				testutil.Ok(t, err)
-				defer func() { testutil.Ok(t, os.RemoveAll(dir)) }()
+				dir = t.TempDir()
 			}
 			relabelConf, err := block.ParseRelabelConfig([]byte(sc.relabel), block.SelectorSupportedRelabelActions)
 			testutil.Ok(t, err)
@@ -841,7 +878,7 @@ func testSharding(t *testing.T, reuseDisk string, bkt objstore.Bucket, all ...ul
 			metaFetcher, err := block.NewMetaFetcher(logger, 20, objstore.WithNoopInstr(bkt), dir, nil, []block.MetadataFilter{
 				block.NewTimePartitionMetaFilter(allowAllFilterConf.MinTime, allowAllFilterConf.MaxTime),
 				block.NewLabelShardedMetaFilter(relabelConf),
-			}, nil)
+			})
 			testutil.Ok(t, err)
 
 			bucketStore, err := NewBucketStore(
@@ -1013,9 +1050,7 @@ func TestReadIndexCache_LoadSeries(t *testing.T) {
 func TestBucketIndexReader_ExpandedPostings(t *testing.T) {
 	tb := testutil.NewTB(t)
 
-	tmpDir, err := ioutil.TempDir("", "test-expanded-postings")
-	testutil.Ok(tb, err)
-	defer func() { testutil.Ok(tb, os.RemoveAll(tmpDir)) }()
+	tmpDir := t.TempDir()
 
 	bkt, err := filesystem.NewBucket(filepath.Join(tmpDir, "bkt"))
 	testutil.Ok(tb, err)
@@ -1032,9 +1067,7 @@ func TestBucketIndexReader_ExpandedPostings(t *testing.T) {
 func BenchmarkBucketIndexReader_ExpandedPostings(b *testing.B) {
 	tb := testutil.NewTB(b)
 
-	tmpDir, err := ioutil.TempDir("", "bench-expanded-postings")
-	testutil.Ok(tb, err)
-	defer func() { testutil.Ok(tb, os.RemoveAll(tmpDir)) }()
+	tmpDir := b.TempDir()
 
 	bkt, err := filesystem.NewBucket(filepath.Join(tmpDir, "bkt"))
 	testutil.Ok(tb, err)
@@ -1051,7 +1084,7 @@ func uploadTestBlock(t testing.TB, tmpDir string, bkt objstore.Bucket, series in
 	headOpts := tsdb.DefaultHeadOptions()
 	headOpts.ChunkDirRoot = tmpDir
 	headOpts.ChunkRange = 1000
-	h, err := tsdb.NewHead(nil, nil, nil, headOpts, nil)
+	h, err := tsdb.NewHead(nil, nil, nil, nil, headOpts, nil)
 	testutil.Ok(t, err)
 	defer func() {
 		testutil.Ok(t, h.Close())
@@ -1083,14 +1116,16 @@ func appendTestData(t testing.TB, app storage.Appender, series int) {
 	}
 
 	series = series / 5
+	uniq := 0
 	for n := 0; n < 10; n++ {
 		for i := 0; i < series/10; i++ {
-			addSeries(labels.FromStrings("i", strconv.Itoa(i)+storetestutil.LabelLongSuffix, "n", strconv.Itoa(n)+storetestutil.LabelLongSuffix, "j", "foo"))
+			addSeries(labels.FromStrings("i", strconv.Itoa(i)+storetestutil.LabelLongSuffix, "n", strconv.Itoa(n)+storetestutil.LabelLongSuffix, "j", "foo", "uniq", fmt.Sprintf("%08d", uniq)))
 			// Have some series that won't be matched, to properly test inverted matches.
-			addSeries(labels.FromStrings("i", strconv.Itoa(i)+storetestutil.LabelLongSuffix, "n", strconv.Itoa(n)+storetestutil.LabelLongSuffix, "j", "bar"))
-			addSeries(labels.FromStrings("i", strconv.Itoa(i)+storetestutil.LabelLongSuffix, "n", "0_"+strconv.Itoa(n)+storetestutil.LabelLongSuffix, "j", "bar"))
-			addSeries(labels.FromStrings("i", strconv.Itoa(i)+storetestutil.LabelLongSuffix, "n", "1_"+strconv.Itoa(n)+storetestutil.LabelLongSuffix, "j", "bar"))
-			addSeries(labels.FromStrings("i", strconv.Itoa(i)+storetestutil.LabelLongSuffix, "n", "2_"+strconv.Itoa(n)+storetestutil.LabelLongSuffix, "j", "foo"))
+			addSeries(labels.FromStrings("i", strconv.Itoa(i)+storetestutil.LabelLongSuffix, "n", strconv.Itoa(n)+storetestutil.LabelLongSuffix, "j", "bar", "uniq", fmt.Sprintf("%08d", uniq+1)))
+			addSeries(labels.FromStrings("i", strconv.Itoa(i)+storetestutil.LabelLongSuffix, "n", "0_"+strconv.Itoa(n)+storetestutil.LabelLongSuffix, "j", "bar", "uniq", fmt.Sprintf("%08d", uniq+2)))
+			addSeries(labels.FromStrings("i", strconv.Itoa(i)+storetestutil.LabelLongSuffix, "n", "1_"+strconv.Itoa(n)+storetestutil.LabelLongSuffix, "j", "bar", "uniq", fmt.Sprintf("%08d", uniq+3)))
+			addSeries(labels.FromStrings("i", strconv.Itoa(i)+storetestutil.LabelLongSuffix, "n", "2_"+strconv.Itoa(n)+storetestutil.LabelLongSuffix, "j", "foo", "uniq", fmt.Sprintf("%08d", uniq+4)))
+			uniq += 5
 		}
 	}
 	testutil.Ok(t, app.Commit())
@@ -1131,6 +1166,19 @@ func benchmarkExpandedPostings(
 	iNot2 := labels.MustNewMatcher(labels.MatchNotEqual, "n", "2"+storetestutil.LabelLongSuffix)
 	iNot2Star := labels.MustNewMatcher(labels.MatchNotRegexp, "i", "^2.*$")
 	iRegexSet := labels.MustNewMatcher(labels.MatchRegexp, "i", "0"+storetestutil.LabelLongSuffix+"|1"+storetestutil.LabelLongSuffix+"|2"+storetestutil.LabelLongSuffix)
+	bigValueSetSize := series / 10
+	if bigValueSetSize > 50000 {
+		bigValueSetSize = 50000
+	}
+	bigValueSet := make([]string, 0, bigValueSetSize)
+	for i := 0; i < series; i += series / bigValueSetSize {
+		bigValueSet = append(bigValueSet, fmt.Sprintf("%08d", i))
+	}
+	bigValueSetSize = len(bigValueSet)
+	rand.New(rand.NewSource(time.Now().UnixNano())).Shuffle(len(bigValueSet), func(i, j int) {
+		bigValueSet[i], bigValueSet[j] = bigValueSet[j], bigValueSet[i]
+	})
+	iRegexBigValueSet := labels.MustNewMatcher(labels.MatchRegexp, "uniq", strings.Join(bigValueSet, "|"))
 
 	series = series / 5
 	cases := []struct {
@@ -1156,6 +1204,7 @@ func benchmarkExpandedPostings(
 		{`n="1",i=~".+",i!="2",j="foo"`, []*labels.Matcher{n1, iPlus, iNot2, jFoo}, int(float64(series) * 0.1)},
 		{`n="1",i=~".+",i!~"2.*",j="foo"`, []*labels.Matcher{n1, iPlus, iNot2Star, jFoo}, int(1 + float64(series)*0.088888)},
 		{`i=~"0|1|2"`, []*labels.Matcher{iRegexSet}, 150}, // 50 series for "1", 50 for "2" and 50 for "3".
+		{`uniq=~"9|random-shuffled-values|1"`, []*labels.Matcher{iRegexBigValueSet}, bigValueSetSize},
 	}
 
 	for _, c := range cases {
@@ -1215,9 +1264,7 @@ func BenchmarkBucketSkipChunksSeries(b *testing.B) {
 func benchBucketSeries(t testutil.TB, skipChunk bool, samplesPerSeries, totalSeries int, requestedRatios ...float64) {
 	const numOfBlocks = 4
 
-	tmpDir, err := ioutil.TempDir("", "testorbench-bucketseries")
-	testutil.Ok(t, err)
-	defer func() { testutil.Ok(t, os.RemoveAll(tmpDir)) }()
+	tmpDir := t.TempDir()
 
 	bkt, err := filesystem.NewBucket(filepath.Join(tmpDir, "bkt"))
 	testutil.Ok(t, err)
@@ -1379,9 +1426,7 @@ func (m *mockedPool) Put(b *[]byte) {
 
 // Regression test against: https://github.com/thanos-io/thanos/issues/2147.
 func TestBucketSeries_OneBlock_InMemIndexCacheSegfault(t *testing.T) {
-	tmpDir, err := ioutil.TempDir("", "segfault-series")
-	testutil.Ok(t, err)
-	defer func() { testutil.Ok(t, os.RemoveAll(tmpDir)) }()
+	tmpDir := t.TempDir()
 
 	bkt, err := filesystem.NewBucket(filepath.Join(tmpDir, "bkt"))
 	testutil.Ok(t, err)
@@ -1417,7 +1462,7 @@ func TestBucketSeries_OneBlock_InMemIndexCacheSegfault(t *testing.T) {
 	// This allows to pick time range that will correspond to number of series picked 1:1.
 	{
 		// Block 1.
-		h, err := tsdb.NewHead(nil, nil, nil, headOpts, nil)
+		h, err := tsdb.NewHead(nil, nil, nil, nil, headOpts, nil)
 		testutil.Ok(t, err)
 		defer func() { testutil.Ok(t, h.Close()) }()
 
@@ -1456,7 +1501,7 @@ func TestBucketSeries_OneBlock_InMemIndexCacheSegfault(t *testing.T) {
 	var b2 *bucketBlock
 	{
 		// Block 2, do not load this block yet.
-		h, err := tsdb.NewHead(nil, nil, nil, headOpts, nil)
+		h, err := tsdb.NewHead(nil, nil, nil, nil, headOpts, nil)
 		testutil.Ok(t, err)
 		defer func() { testutil.Ok(t, h.Close()) }()
 
@@ -1630,9 +1675,7 @@ func TestSeries_RequestAndResponseHints(t *testing.T) {
 func TestSeries_ErrorUnmarshallingRequestHints(t *testing.T) {
 	tb := testutil.NewTB(t)
 
-	tmpDir, err := ioutil.TempDir("", "test-series-hints-enabled")
-	testutil.Ok(t, err)
-	defer func() { testutil.Ok(t, os.RemoveAll(tmpDir)) }()
+	tmpDir := t.TempDir()
 
 	bktDir := filepath.Join(tmpDir, "bkt")
 	bkt, err := filesystem.NewBucket(bktDir)
@@ -1645,7 +1688,7 @@ func TestSeries_ErrorUnmarshallingRequestHints(t *testing.T) {
 	)
 
 	// Instance a real bucket store we'll use to query the series.
-	fetcher, err := block.NewMetaFetcher(logger, 10, instrBkt, tmpDir, nil, nil, nil)
+	fetcher, err := block.NewMetaFetcher(logger, 10, instrBkt, tmpDir, nil, nil)
 	testutil.Ok(tb, err)
 
 	indexCache, err := storecache.NewInMemoryIndexCacheWithConfig(logger, nil, storecache.InMemoryIndexCacheConfig{})
@@ -1691,9 +1734,7 @@ func TestSeries_ErrorUnmarshallingRequestHints(t *testing.T) {
 func TestSeries_BlockWithMultipleChunks(t *testing.T) {
 	tb := testutil.NewTB(t)
 
-	tmpDir, err := ioutil.TempDir("", "test-block-with-multiple-chunks")
-	testutil.Ok(t, err)
-	defer func() { testutil.Ok(t, os.RemoveAll(tmpDir)) }()
+	tmpDir := t.TempDir()
 
 	// Create a block with 1 series but an high number of samples,
 	// so that they will span across multiple chunks.
@@ -1701,7 +1742,7 @@ func TestSeries_BlockWithMultipleChunks(t *testing.T) {
 	headOpts.ChunkDirRoot = filepath.Join(tmpDir, "block")
 	headOpts.ChunkRange = 10000000000
 
-	h, err := tsdb.NewHead(nil, nil, nil, headOpts, nil)
+	h, err := tsdb.NewHead(nil, nil, nil, nil, headOpts, nil)
 	testutil.Ok(t, err)
 	defer func() { testutil.Ok(t, h.Close()) }()
 
@@ -1737,7 +1778,7 @@ func TestSeries_BlockWithMultipleChunks(t *testing.T) {
 	testutil.Ok(t, block.Upload(context.Background(), logger, bkt, filepath.Join(headOpts.ChunkDirRoot, blk.String()), metadata.NoneFunc))
 
 	// Instance a real bucket store we'll use to query the series.
-	fetcher, err := block.NewMetaFetcher(logger, 10, instrBkt, tmpDir, nil, nil, nil)
+	fetcher, err := block.NewMetaFetcher(logger, 10, instrBkt, tmpDir, nil, nil)
 	testutil.Ok(tb, err)
 
 	indexCache, err := storecache.NewInMemoryIndexCacheWithConfig(logger, nil, storecache.InMemoryIndexCacheConfig{})
@@ -1848,7 +1889,7 @@ func createBlockWithOneSeriesWithStep(t testutil.TB, dir string, lbls labels.Lab
 	headOpts := tsdb.DefaultHeadOptions()
 	headOpts.ChunkDirRoot = dir
 	headOpts.ChunkRange = int64(totalSamples) * step
-	h, err := tsdb.NewHead(nil, nil, nil, headOpts, nil)
+	h, err := tsdb.NewHead(nil, nil, nil, nil, headOpts, nil)
 	testutil.Ok(t, err)
 	defer func() { testutil.Ok(t, h.Close()) }()
 
@@ -1871,9 +1912,7 @@ func setupStoreForHintsTest(t *testing.T) (testutil.TB, *BucketStore, []*storepb
 
 	closers := []func(){}
 
-	tmpDir, err := ioutil.TempDir("", "test-hints")
-	testutil.Ok(t, err)
-	closers = append(closers, func() { testutil.Ok(t, os.RemoveAll(tmpDir)) })
+	tmpDir := t.TempDir()
 
 	bktDir := filepath.Join(tmpDir, "bkt")
 	bkt, err := filesystem.NewBucket(bktDir)
@@ -1920,7 +1959,7 @@ func setupStoreForHintsTest(t *testing.T) (testutil.TB, *BucketStore, []*storepb
 	}
 
 	// Instance a real bucket store we'll use to query back the series.
-	fetcher, err := block.NewMetaFetcher(logger, 10, instrBkt, tmpDir, nil, nil, nil)
+	fetcher, err := block.NewMetaFetcher(logger, 10, instrBkt, tmpDir, nil, nil)
 	testutil.Ok(tb, err)
 
 	indexCache, err := storecache.NewInMemoryIndexCacheWithConfig(logger, nil, storecache.InMemoryIndexCacheConfig{})
@@ -2120,11 +2159,7 @@ func BenchmarkBucketBlock_readChunkRange(b *testing.B) {
 		readLengths = []int64{300, 500, 1000, 5000, 10000, 30000, 50000, 100000, 300000, 1500000}
 	)
 
-	tmpDir, err := ioutil.TempDir("", "benchmark")
-	testutil.Ok(b, err)
-	b.Cleanup(func() {
-		testutil.Ok(b, os.RemoveAll(tmpDir))
-	})
+	tmpDir := b.TempDir()
 
 	bkt, err := filesystem.NewBucket(filepath.Join(tmpDir, "bkt"))
 	testutil.Ok(b, err)
@@ -2185,11 +2220,7 @@ func prepareBucket(b *testing.B, resolutionLevel compact.ResolutionLevel) (*buck
 		logger = log.NewNopLogger()
 	)
 
-	tmpDir, err := ioutil.TempDir("", "benchmark")
-	testutil.Ok(b, err)
-	b.Cleanup(func() {
-		testutil.Ok(b, os.RemoveAll(tmpDir))
-	})
+	tmpDir := b.TempDir()
 
 	bkt, err := filesystem.NewBucket(filepath.Join(tmpDir, "bkt"))
 	testutil.Ok(b, err)
@@ -2257,6 +2288,11 @@ func benchmarkBlockSeriesWithConcurrency(b *testing.B, concurrency int, blockMet
 	// No limits.
 	chunksLimiter := NewChunksLimiterFactory(0)(nil)
 	seriesLimiter := NewSeriesLimiterFactory(0)(nil)
+	dummyCounter := promauto.NewCounter(prometheus.CounterOpts{
+		Name: "dummy",
+		Help: "dummy help",
+	})
+	ctx := context.Background()
 
 	// Run multiple workers to execute the queries.
 	wg := sync.WaitGroup{}
@@ -2290,7 +2326,7 @@ func benchmarkBlockSeriesWithConcurrency(b *testing.B, concurrency int, blockMet
 				indexReader := blk.indexReader()
 				chunkReader := blk.chunkReader()
 
-				seriesSet, _, err := blockSeries(context.Background(), nil, indexReader, chunkReader, matchers, chunksLimiter, seriesLimiter, req.SkipChunks, req.MinTime, req.MaxTime, req.Aggregates)
+				seriesSet, _, err := blockSeries(ctx, nil, indexReader, chunkReader, matchers, chunksLimiter, seriesLimiter, req.SkipChunks, req.MinTime, req.MaxTime, req.Aggregates, nil, dummyCounter)
 				testutil.Ok(b, err)
 
 				// Ensure at least 1 series has been returned (as expected).

@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"path"
 	"strings"
@@ -23,9 +22,9 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	promtest "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/prometheus/prometheus/model/labels"
+	"github.com/thanos-io/objstore"
 
 	"github.com/thanos-io/thanos/pkg/block/metadata"
-	"github.com/thanos-io/thanos/pkg/objstore"
 	"github.com/thanos-io/thanos/pkg/testutil"
 	"github.com/thanos-io/thanos/pkg/testutil/e2eutil"
 )
@@ -81,9 +80,7 @@ func TestUpload(t *testing.T) {
 
 	ctx := context.Background()
 
-	tmpDir, err := ioutil.TempDir("", "test-block-upload")
-	testutil.Ok(t, err)
-	defer func() { testutil.Ok(t, os.RemoveAll(tmpDir)) }()
+	tmpDir := t.TempDir()
 
 	bkt := objstore.NewInMemBucket()
 	b1, err := e2eutil.CreateBlock(ctx, tmpDir, []labels.Labels{
@@ -141,7 +138,7 @@ func TestUpload(t *testing.T) {
 	{
 		// Full block.
 		testutil.Ok(t, Upload(ctx, log.NewNopLogger(), bkt, path.Join(tmpDir, "test", b1.String()), metadata.NoneFunc))
-		testutil.Equals(t, 4, len(bkt.Objects()))
+		testutil.Equals(t, 3, len(bkt.Objects()))
 		testutil.Equals(t, 3751, len(bkt.Objects()[path.Join(b1.String(), ChunksDirname, "000001")]))
 		testutil.Equals(t, 401, len(bkt.Objects()[path.Join(b1.String(), IndexFilename)]))
 		testutil.Equals(t, 546, len(bkt.Objects()[path.Join(b1.String(), MetaFilename)]))
@@ -191,7 +188,7 @@ func TestUpload(t *testing.T) {
 	{
 		// Test Upload is idempotent.
 		testutil.Ok(t, Upload(ctx, log.NewNopLogger(), bkt, path.Join(tmpDir, "test", b1.String()), metadata.NoneFunc))
-		testutil.Equals(t, 4, len(bkt.Objects()))
+		testutil.Equals(t, 3, len(bkt.Objects()))
 		testutil.Equals(t, 3751, len(bkt.Objects()[path.Join(b1.String(), ChunksDirname, "000001")]))
 		testutil.Equals(t, 401, len(bkt.Objects()[path.Join(b1.String(), IndexFilename)]))
 		testutil.Equals(t, 546, len(bkt.Objects()[path.Join(b1.String(), MetaFilename)]))
@@ -209,7 +206,7 @@ func TestUpload(t *testing.T) {
 		err = Upload(ctx, log.NewNopLogger(), bkt, path.Join(tmpDir, b2.String()), metadata.NoneFunc)
 		testutil.NotOk(t, err)
 		testutil.Equals(t, "empty external labels are not allowed for Thanos block.", err.Error())
-		testutil.Equals(t, 4, len(bkt.Objects()))
+		testutil.Equals(t, 3, len(bkt.Objects()))
 	}
 	{
 		// No external labels with UploadPromBlocks.
@@ -223,7 +220,7 @@ func TestUpload(t *testing.T) {
 		testutil.Ok(t, err)
 		err = UploadPromBlock(ctx, log.NewNopLogger(), bkt, path.Join(tmpDir, b2.String()), metadata.NoneFunc)
 		testutil.Ok(t, err)
-		testutil.Equals(t, 8, len(bkt.Objects()))
+		testutil.Equals(t, 6, len(bkt.Objects()))
 		testutil.Equals(t, 3736, len(bkt.Objects()[path.Join(b2.String(), ChunksDirname, "000001")]))
 		testutil.Equals(t, 401, len(bkt.Objects()[path.Join(b2.String(), IndexFilename)]))
 		testutil.Equals(t, 525, len(bkt.Objects()[path.Join(b2.String(), MetaFilename)]))
@@ -234,9 +231,7 @@ func TestDelete(t *testing.T) {
 	defer testutil.TolerantVerifyLeak(t)
 	ctx := context.Background()
 
-	tmpDir, err := ioutil.TempDir("", "test-block-delete")
-	testutil.Ok(t, err)
-	defer func() { testutil.Ok(t, os.RemoveAll(tmpDir)) }()
+	tmpDir := t.TempDir()
 
 	bkt := objstore.NewInMemBucket()
 	{
@@ -249,15 +244,14 @@ func TestDelete(t *testing.T) {
 		}, 100, 0, 1000, labels.Labels{{Name: "ext1", Value: "val1"}}, 124, metadata.NoneFunc)
 		testutil.Ok(t, err)
 		testutil.Ok(t, Upload(ctx, log.NewNopLogger(), bkt, path.Join(tmpDir, b1.String()), metadata.NoneFunc))
-		testutil.Equals(t, 4, len(bkt.Objects()))
+		testutil.Equals(t, 3, len(bkt.Objects()))
 
 		markedForDeletion := promauto.With(prometheus.NewRegistry()).NewCounter(prometheus.CounterOpts{Name: "test"})
 		testutil.Ok(t, MarkForDeletion(ctx, log.NewNopLogger(), bkt, b1, "", markedForDeletion))
 
 		// Full delete.
 		testutil.Ok(t, Delete(ctx, log.NewNopLogger(), bkt, b1))
-		// Still debug meta entry is expected.
-		testutil.Equals(t, 1, len(bkt.Objects()))
+		testutil.Equals(t, 0, len(bkt.Objects()))
 	}
 	{
 		b2, err := e2eutil.CreateBlock(ctx, tmpDir, []labels.Labels{
@@ -269,13 +263,12 @@ func TestDelete(t *testing.T) {
 		}, 100, 0, 1000, labels.Labels{{Name: "ext1", Value: "val1"}}, 124, metadata.NoneFunc)
 		testutil.Ok(t, err)
 		testutil.Ok(t, Upload(ctx, log.NewNopLogger(), bkt, path.Join(tmpDir, b2.String()), metadata.NoneFunc))
-		testutil.Equals(t, 5, len(bkt.Objects()))
+		testutil.Equals(t, 3, len(bkt.Objects()))
 
 		// Remove meta.json and check if delete can delete it.
 		testutil.Ok(t, bkt.Delete(ctx, path.Join(b2.String(), MetaFilename)))
 		testutil.Ok(t, Delete(ctx, log.NewNopLogger(), bkt, b2))
-		// Still 2 debug meta entries are expected.
-		testutil.Equals(t, 2, len(bkt.Objects()))
+		testutil.Equals(t, 0, len(bkt.Objects()))
 	}
 }
 
@@ -283,9 +276,7 @@ func TestMarkForDeletion(t *testing.T) {
 	defer testutil.TolerantVerifyLeak(t)
 	ctx := context.Background()
 
-	tmpDir, err := ioutil.TempDir("", "test-block-mark-for-delete")
-	testutil.Ok(t, err)
-	defer func() { testutil.Ok(t, os.RemoveAll(tmpDir)) }()
+	tmpDir := t.TempDir()
 
 	for _, tcase := range []struct {
 		name      string
@@ -339,9 +330,7 @@ func TestMarkForNoCompact(t *testing.T) {
 	defer testutil.TolerantVerifyLeak(t)
 	ctx := context.Background()
 
-	tmpDir, err := ioutil.TempDir("", "test-block-mark-for-no-compact")
-	testutil.Ok(t, err)
-	defer func() { testutil.Ok(t, os.RemoveAll(tmpDir)) }()
+	tmpDir := t.TempDir()
 
 	for _, tcase := range []struct {
 		name      string
@@ -399,11 +388,7 @@ func TestHashDownload(t *testing.T) {
 
 	ctx := context.Background()
 
-	tmpDir, err := ioutil.TempDir("", "test-block-download")
-	testutil.Ok(t, err)
-	t.Cleanup(func() {
-		testutil.Ok(t, os.RemoveAll(tmpDir))
-	})
+	tmpDir := t.TempDir()
 
 	bkt := objstore.NewInMemBucket()
 	r := prometheus.NewRegistry()
@@ -415,7 +400,7 @@ func TestHashDownload(t *testing.T) {
 	testutil.Ok(t, err)
 
 	testutil.Ok(t, Upload(ctx, log.NewNopLogger(), instrumentedBkt, path.Join(tmpDir, b1.String()), metadata.SHA256Func))
-	testutil.Equals(t, 4, len(bkt.Objects()))
+	testutil.Equals(t, 3, len(bkt.Objects()))
 
 	m, err := DownloadMeta(ctx, log.NewNopLogger(), bkt, b1)
 	testutil.Ok(t, err)
@@ -447,7 +432,7 @@ func TestHashDownload(t *testing.T) {
         thanos_objstore_bucket_operations_total{bucket="test",operation="get"} 2
         thanos_objstore_bucket_operations_total{bucket="test",operation="get_range"} 0
         thanos_objstore_bucket_operations_total{bucket="test",operation="iter"} 2
-        thanos_objstore_bucket_operations_total{bucket="test",operation="upload"} 4
+        thanos_objstore_bucket_operations_total{bucket="test",operation="upload"} 3
 		`), `thanos_objstore_bucket_operations_total`))
 	}
 
@@ -465,7 +450,7 @@ func TestHashDownload(t *testing.T) {
         thanos_objstore_bucket_operations_total{bucket="test",operation="get"} 4
         thanos_objstore_bucket_operations_total{bucket="test",operation="get_range"} 0
         thanos_objstore_bucket_operations_total{bucket="test",operation="iter"} 4
-        thanos_objstore_bucket_operations_total{bucket="test",operation="upload"} 4
+        thanos_objstore_bucket_operations_total{bucket="test",operation="upload"} 3
 		`), `thanos_objstore_bucket_operations_total`))
 	}
 
@@ -485,7 +470,7 @@ func TestHashDownload(t *testing.T) {
 			thanos_objstore_bucket_operations_total{bucket="test",operation="get"} 7
 			thanos_objstore_bucket_operations_total{bucket="test",operation="get_range"} 0
 			thanos_objstore_bucket_operations_total{bucket="test",operation="iter"} 6
-			thanos_objstore_bucket_operations_total{bucket="test",operation="upload"} 4
+			thanos_objstore_bucket_operations_total{bucket="test",operation="upload"} 3
 			`), `thanos_objstore_bucket_operations_total`))
 	}
 }
@@ -495,9 +480,7 @@ func TestUploadCleanup(t *testing.T) {
 
 	ctx := context.Background()
 
-	tmpDir, err := ioutil.TempDir("", "test-block-upload")
-	testutil.Ok(t, err)
-	defer func() { testutil.Ok(t, os.RemoveAll(tmpDir)) }()
+	tmpDir := t.TempDir()
 
 	bkt := objstore.NewInMemBucket()
 	b1, err := e2eutil.CreateBlock(ctx, tmpDir, []labels.Labels{
@@ -516,8 +499,8 @@ func TestUploadCleanup(t *testing.T) {
 		testutil.Assert(t, errors.Is(uploadErr, errUploadFailed))
 
 		// If upload of index fails, block is deleted.
-		testutil.Equals(t, 1, len(bkt.Objects())) // Only debug meta file is present.
-		testutil.Assert(t, len(bkt.Objects()[path.Join(DebugMetas, fmt.Sprintf("%s.json", b1.String()))]) > 0)
+		testutil.Equals(t, 0, len(bkt.Objects()))
+		testutil.Assert(t, len(bkt.Objects()[path.Join(DebugMetas, fmt.Sprintf("%s.json", b1.String()))]) == 0)
 	}
 
 	{
@@ -527,11 +510,11 @@ func TestUploadCleanup(t *testing.T) {
 		testutil.Assert(t, errors.Is(uploadErr, errUploadFailed))
 
 		// If upload of meta.json fails, nothing is cleaned up.
-		testutil.Equals(t, 4, len(bkt.Objects()))
+		testutil.Equals(t, 3, len(bkt.Objects()))
 		testutil.Assert(t, len(bkt.Objects()[path.Join(b1.String(), ChunksDirname, "000001")]) > 0)
 		testutil.Assert(t, len(bkt.Objects()[path.Join(b1.String(), IndexFilename)]) > 0)
 		testutil.Assert(t, len(bkt.Objects()[path.Join(b1.String(), MetaFilename)]) > 0)
-		testutil.Assert(t, len(bkt.Objects()[path.Join(DebugMetas, fmt.Sprintf("%s.json", b1.String()))]) > 0)
+		testutil.Assert(t, len(bkt.Objects()[path.Join(DebugMetas, fmt.Sprintf("%s.json", b1.String()))]) == 0)
 	}
 }
 

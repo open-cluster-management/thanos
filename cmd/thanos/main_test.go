@@ -7,7 +7,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"path"
 	"strings"
@@ -19,12 +18,11 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	promtest "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/prometheus/prometheus/model/labels"
+	"github.com/thanos-io/objstore"
 
 	"github.com/thanos-io/thanos/pkg/block"
 	"github.com/thanos-io/thanos/pkg/block/metadata"
-	"github.com/thanos-io/thanos/pkg/compact"
 	"github.com/thanos-io/thanos/pkg/compact/downsample"
-	"github.com/thanos-io/thanos/pkg/objstore"
 	"github.com/thanos-io/thanos/pkg/testutil"
 	"github.com/thanos-io/thanos/pkg/testutil/e2eutil"
 )
@@ -106,9 +104,7 @@ func (b *erroringBucket) Name() string {
 // Testing for https://github.com/thanos-io/thanos/issues/4960.
 func TestRegression4960_Deadlock(t *testing.T) {
 	logger := log.NewLogfmtLogger(os.Stderr)
-	dir, err := ioutil.TempDir("", "test-compact-cleanup")
-	testutil.Ok(t, err)
-	defer func() { testutil.Ok(t, os.RemoveAll(dir)) }()
+	dir := t.TempDir()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -116,12 +112,13 @@ func TestRegression4960_Deadlock(t *testing.T) {
 	bkt := objstore.WithNoopInstr(objstore.NewInMemBucket())
 	bkt = &erroringBucket{bkt: bkt}
 	var id, id2, id3 ulid.ULID
+	var err error
 	{
 		id, err = e2eutil.CreateBlock(
 			ctx,
 			dir,
 			[]labels.Labels{{{Name: "a", Value: "1"}}},
-			1, 0, downsample.DownsampleRange0+1, // Pass the minimum DownsampleRange0 check.
+			1, 0, downsample.ResLevel1DownsampleRange+1, // Pass the minimum ResLevel1DownsampleRange check.
 			labels.Labels{{Name: "e1", Value: "1"}},
 			downsample.ResLevel0, metadata.NoneFunc)
 		testutil.Ok(t, err)
@@ -132,7 +129,7 @@ func TestRegression4960_Deadlock(t *testing.T) {
 			ctx,
 			dir,
 			[]labels.Labels{{{Name: "a", Value: "2"}}},
-			1, 0, downsample.DownsampleRange0+1, // Pass the minimum DownsampleRange0 check.
+			1, 0, downsample.ResLevel1DownsampleRange+1, // Pass the minimum ResLevel1DownsampleRange check.
 			labels.Labels{{Name: "e1", Value: "2"}},
 			downsample.ResLevel0, metadata.NoneFunc)
 		testutil.Ok(t, err)
@@ -143,7 +140,7 @@ func TestRegression4960_Deadlock(t *testing.T) {
 			ctx,
 			dir,
 			[]labels.Labels{{{Name: "a", Value: "2"}}},
-			1, 0, downsample.DownsampleRange0+1, // Pass the minimum DownsampleRange0 check.
+			1, 0, downsample.ResLevel1DownsampleRange+1, // Pass the minimum ResLevel1DownsampleRange check.
 			labels.Labels{{Name: "e1", Value: "2"}},
 			downsample.ResLevel0, metadata.NoneFunc)
 		testutil.Ok(t, err)
@@ -154,13 +151,13 @@ func TestRegression4960_Deadlock(t *testing.T) {
 	testutil.Ok(t, err)
 
 	metrics := newDownsampleMetrics(prometheus.NewRegistry())
-	testutil.Equals(t, 0.0, promtest.ToFloat64(metrics.downsamples.WithLabelValues(compact.DefaultGroupKey(meta.Thanos))))
-	metaFetcher, err := block.NewMetaFetcher(nil, block.FetcherConcurrency, bkt, "", nil, nil, nil)
+	testutil.Equals(t, 0.0, promtest.ToFloat64(metrics.downsamples.WithLabelValues(meta.Thanos.GroupKey())))
+	metaFetcher, err := block.NewMetaFetcher(nil, block.FetcherConcurrency, bkt, "", nil, nil)
 	testutil.Ok(t, err)
 
 	metas, _, err := metaFetcher.Fetch(ctx)
 	testutil.Ok(t, err)
-	err = downsampleBucket(ctx, logger, metrics, bkt, metas, dir, 1, metadata.NoneFunc)
+	err = downsampleBucket(ctx, logger, metrics, bkt, metas, dir, 1, metadata.NoneFunc, false)
 	testutil.NotOk(t, err)
 
 	testutil.Assert(t, strings.Contains(err.Error(), "some random error has occurred"))
@@ -169,21 +166,20 @@ func TestRegression4960_Deadlock(t *testing.T) {
 
 func TestCleanupDownsampleCacheFolder(t *testing.T) {
 	logger := log.NewLogfmtLogger(os.Stderr)
-	dir, err := ioutil.TempDir("", "test-compact-cleanup")
-	testutil.Ok(t, err)
-	defer func() { testutil.Ok(t, os.RemoveAll(dir)) }()
+	dir := t.TempDir()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	bkt := objstore.WithNoopInstr(objstore.NewInMemBucket())
 	var id ulid.ULID
+	var err error
 	{
 		id, err = e2eutil.CreateBlock(
 			ctx,
 			dir,
 			[]labels.Labels{{{Name: "a", Value: "1"}}},
-			1, 0, downsample.DownsampleRange0+1, // Pass the minimum DownsampleRange0 check.
+			1, 0, downsample.ResLevel1DownsampleRange+1, // Pass the minimum ResLevel1DownsampleRange check.
 			labels.Labels{{Name: "e1", Value: "1"}},
 			downsample.ResLevel0, metadata.NoneFunc)
 		testutil.Ok(t, err)
@@ -194,14 +190,14 @@ func TestCleanupDownsampleCacheFolder(t *testing.T) {
 	testutil.Ok(t, err)
 
 	metrics := newDownsampleMetrics(prometheus.NewRegistry())
-	testutil.Equals(t, 0.0, promtest.ToFloat64(metrics.downsamples.WithLabelValues(compact.DefaultGroupKey(meta.Thanos))))
-	metaFetcher, err := block.NewMetaFetcher(nil, block.FetcherConcurrency, bkt, "", nil, nil, nil)
+	testutil.Equals(t, 0.0, promtest.ToFloat64(metrics.downsamples.WithLabelValues(meta.Thanos.GroupKey())))
+	metaFetcher, err := block.NewMetaFetcher(nil, block.FetcherConcurrency, bkt, "", nil, nil)
 	testutil.Ok(t, err)
 
 	metas, _, err := metaFetcher.Fetch(ctx)
 	testutil.Ok(t, err)
-	testutil.Ok(t, downsampleBucket(ctx, logger, metrics, bkt, metas, dir, 1, metadata.NoneFunc))
-	testutil.Equals(t, 1.0, promtest.ToFloat64(metrics.downsamples.WithLabelValues(compact.DefaultGroupKey(meta.Thanos))))
+	testutil.Ok(t, downsampleBucket(ctx, logger, metrics, bkt, metas, dir, 1, metadata.NoneFunc, false))
+	testutil.Equals(t, 1.0, promtest.ToFloat64(metrics.downsamples.WithLabelValues(meta.Thanos.GroupKey())))
 
 	_, err = os.Stat(dir)
 	testutil.Assert(t, os.IsNotExist(err), "index cache dir should not exist at the end of execution")

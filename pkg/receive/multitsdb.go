@@ -5,11 +5,13 @@ package receive
 
 import (
 	"context"
-	"io/ioutil"
+	"fmt"
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"sync"
+	"time"
 
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
@@ -21,15 +23,25 @@ import (
 	"go.uber.org/atomic"
 	"golang.org/x/sync/errgroup"
 
+	"github.com/thanos-io/thanos/pkg/api/status"
+
+	"github.com/thanos-io/objstore"
+
 	"github.com/thanos-io/thanos/pkg/block/metadata"
 	"github.com/thanos-io/thanos/pkg/component"
 	"github.com/thanos-io/thanos/pkg/errutil"
 	"github.com/thanos-io/thanos/pkg/exemplars"
-	"github.com/thanos-io/thanos/pkg/objstore"
 	"github.com/thanos-io/thanos/pkg/shipper"
 	"github.com/thanos-io/thanos/pkg/store"
 	"github.com/thanos-io/thanos/pkg/store/labelpb"
+	"github.com/thanos-io/thanos/pkg/store/storepb"
 )
+
+type TSDBStats interface {
+	// TenantStats returns TSDB head stats for the given tenants.
+	// If no tenantIDs are provided, stats for all tenants are returned.
+	TenantStats(statsByLabelName string, tenantIDs ...string) []status.TenantStats
+}
 
 type MultiTSDB struct {
 	dataDir         string
@@ -78,6 +90,49 @@ func NewMultiTSDB(
 	}
 }
 
+type localClient struct {
+	storepb.StoreClient
+
+	labelSetFunc  func() []labelpb.ZLabelSet
+	timeRangeFunc func() (int64, int64)
+}
+
+func newLocalClient(
+	c storepb.StoreClient,
+	labelSetFunc func() []labelpb.ZLabelSet,
+	timeRangeFunc func() (int64, int64),
+) *localClient {
+	return &localClient{c, labelSetFunc, timeRangeFunc}
+}
+
+func (l *localClient) LabelSets() []labels.Labels {
+	return labelpb.ZLabelSetsToPromLabelSets(l.labelSetFunc()...)
+}
+
+func (l *localClient) TimeRange() (mint int64, maxt int64) {
+	return l.timeRangeFunc()
+}
+
+func (l *localClient) String() string {
+	mint, maxt := l.timeRangeFunc()
+	return fmt.Sprintf(
+		"LabelSets: %v Mint: %d Maxt: %d",
+		labelpb.PromLabelSetsToString(l.LabelSets()), mint, maxt,
+	)
+}
+
+func (l *localClient) Addr() (string, bool) {
+	return "", true
+}
+
+func (l *localClient) SupportsSharding() bool {
+	return true
+}
+
+func (l *localClient) SendsSortedSeries() bool {
+	return true
+}
+
 type tenant struct {
 	readyS        *ReadyStorage
 	storeTSDB     *store.TSDBStore
@@ -102,6 +157,15 @@ func (t *tenant) store() *store.TSDBStore {
 	t.mtx.RLock()
 	defer t.mtx.RUnlock()
 	return t.storeTSDB
+}
+
+func (t *tenant) client() store.Client {
+	t.mtx.RLock()
+	defer t.mtx.RUnlock()
+
+	store := t.store()
+	client := storepb.ServerAsClient(store, 0)
+	return newLocalClient(client, store.LabelSet, store.TimeRange)
 }
 
 func (t *tenant) exemplars() *exemplars.TSDB {
@@ -130,7 +194,7 @@ func (t *MultiTSDB) Open() error {
 		return err
 	}
 
-	files, err := ioutil.ReadDir(t.dataDir)
+	files, err := os.ReadDir(t.dataDir)
 	if err != nil {
 		return err
 	}
@@ -198,6 +262,98 @@ func (t *MultiTSDB) Close() error {
 	return merr.Err()
 }
 
+// Prune flushes and closes the TSDB for tenants that haven't received
+// any new samples for longer than the TSDB retention period.
+func (t *MultiTSDB) Prune(ctx context.Context) error {
+	// Retention of 0 means infinite retention.
+	if t.tsdbOpts.RetentionDuration == 0 {
+		return nil
+	}
+
+	t.mtx.Lock()
+	defer t.mtx.Unlock()
+
+	var (
+		wg   sync.WaitGroup
+		merr errutil.SyncMultiError
+
+		prunedTenants []string
+		pmtx          sync.Mutex
+	)
+
+	for tenantID, tenantInstance := range t.tenants {
+		wg.Add(1)
+		go func(tenantID string, tenantInstance *tenant) {
+			defer wg.Done()
+			tlog := log.With(t.logger, "tenant", tenantID)
+			pruned, err := t.pruneTSDB(ctx, tlog, tenantInstance)
+			if err != nil {
+				merr.Add(err)
+				return
+			}
+
+			if pruned {
+				pmtx.Lock()
+				defer pmtx.Unlock()
+				prunedTenants = append(prunedTenants, tenantID)
+			}
+		}(tenantID, tenantInstance)
+	}
+	wg.Wait()
+
+	for _, tenantID := range prunedTenants {
+		level.Info(t.logger).Log("msg", "Pruned tenant", "tenant", tenantID)
+		delete(t.tenants, tenantID)
+	}
+
+	return merr.Err()
+}
+
+// pruneTSDB removes a TSDB if its past the retention period.
+// It compacts the TSDB head, sends all remaining blocks to S3 and removes the TSDB from disk.
+func (t *MultiTSDB) pruneTSDB(ctx context.Context, logger log.Logger, tenantInstance *tenant) (bool, error) {
+	tenantTSDB := tenantInstance.readyStorage().get()
+	if tenantTSDB == nil {
+		return false, nil
+	}
+	tdb := tenantTSDB.db
+	head := tdb.Head()
+	if head.MaxTime() < 0 {
+		return false, nil
+	}
+
+	sinceLastAppend := time.Since(time.UnixMilli(head.MaxTime()))
+	if sinceLastAppend.Milliseconds() <= t.tsdbOpts.RetentionDuration {
+		return false, nil
+	}
+
+	level.Info(logger).Log("msg", "Pruning tenant")
+	if err := tdb.CompactHead(tsdb.NewRangeHead(head, head.MinTime(), head.MaxTime())); err != nil {
+		return false, err
+	}
+
+	if tenantInstance.shipper() != nil {
+		uploaded, err := tenantInstance.shipper().Sync(ctx)
+		if err != nil {
+			return false, err
+		}
+
+		if uploaded > 0 {
+			level.Info(logger).Log("msg", "Uploaded head block")
+		}
+	}
+
+	if err := tdb.Close(); err != nil {
+		return false, err
+	}
+
+	if err := os.RemoveAll(tenantTSDB.db.Dir()); err != nil {
+		return false, err
+	}
+
+	return true, nil
+}
+
 func (t *MultiTSDB) Sync(ctx context.Context) (int, error) {
 	if t.bucket == nil {
 		return 0, errors.New("bucket is not specified, Sync should not be invoked")
@@ -236,7 +392,7 @@ func (t *MultiTSDB) Sync(ctx context.Context) (int, error) {
 }
 
 func (t *MultiTSDB) RemoveLockFilesIfAny() error {
-	fis, err := ioutil.ReadDir(t.dataDir)
+	fis, err := os.ReadDir(t.dataDir)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
@@ -261,17 +417,15 @@ func (t *MultiTSDB) RemoveLockFilesIfAny() error {
 	return merr.Err()
 }
 
-func (t *MultiTSDB) TSDBStores() map[string]store.InfoStoreServer {
+func (t *MultiTSDB) TSDBLocalClients() []store.Client {
 	t.mtx.RLock()
 	defer t.mtx.RUnlock()
 
-	res := make(map[string]store.InfoStoreServer, len(t.tenants))
-	for k, tenant := range t.tenants {
-		s := tenant.store()
-		if s != nil {
-			res[k] = s
-		}
+	res := make([]store.Client, 0, len(t.tenants))
+	for _, tenant := range t.tenants {
+		res = append(res, tenant.client())
 	}
+
 	return res
 }
 
@@ -289,8 +443,55 @@ func (t *MultiTSDB) TSDBExemplars() map[string]*exemplars.TSDB {
 	return res
 }
 
+func (t *MultiTSDB) TenantStats(statsByLabelName string, tenantIDs ...string) []status.TenantStats {
+	t.mtx.RLock()
+	defer t.mtx.RUnlock()
+	if len(tenantIDs) == 0 {
+		for tenantID := range t.tenants {
+			tenantIDs = append(tenantIDs, tenantID)
+		}
+	}
+
+	var (
+		mu     sync.Mutex
+		wg     sync.WaitGroup
+		result = make([]status.TenantStats, 0, len(t.tenants))
+	)
+	for _, tenantID := range tenantIDs {
+		tenantInstance, ok := t.tenants[tenantID]
+		if !ok {
+			continue
+		}
+
+		wg.Add(1)
+		go func(tenantID string, tenantInstance *tenant) {
+			defer wg.Done()
+			db := tenantInstance.readyS.Get()
+			if db == nil {
+				return
+			}
+			stats := db.Head().Stats(statsByLabelName)
+
+			mu.Lock()
+			defer mu.Unlock()
+			result = append(result, status.TenantStats{
+				Tenant: tenantID,
+				Stats:  stats,
+			})
+		}(tenantID, tenantInstance)
+	}
+	wg.Wait()
+
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].Tenant < result[j].Tenant
+	})
+	return result
+}
+
 func (t *MultiTSDB) startTSDB(logger log.Logger, tenantID string, tenant *tenant) error {
 	reg := prometheus.WrapRegistererWith(prometheus.Labels{"tenant": tenantID}, t.reg)
+	reg = NewUnRegisterer(reg)
+
 	lset := labelpb.ExtendSortedLabels(t.labels, labels.FromStrings(t.tenantLabelName, tenantID))
 	dataDir := t.defaultTenantDataDir(tenantID)
 
@@ -299,7 +500,7 @@ func (t *MultiTSDB) startTSDB(logger log.Logger, tenantID string, tenant *tenant
 	s, err := tsdb.Open(
 		dataDir,
 		logger,
-		&UnRegisterer{Registerer: reg},
+		reg,
 		&opts,
 		nil,
 	)
@@ -479,20 +680,48 @@ func (a adapter) Close() error {
 // by unregistering already-registered collectors.
 // FlushableStorage uses this registerer in order
 // to not lose metric values between DB flushes.
+//
+// This type cannot embed the inner registerer, because Prometheus since
+// v2.39.0 is wrapping the Registry with prometheus.WrapRegistererWithPrefix.
+// This wrapper will call the Register function of the wrapped registerer.
+// If UnRegisterer is the wrapped registerer, this would end up calling the
+// inner registerer's Register, which doesn't implement the "unregister" logic
+// that this type intends to use.
 type UnRegisterer struct {
-	prometheus.Registerer
+	innerReg prometheus.Registerer
 }
 
+func NewUnRegisterer(inner prometheus.Registerer) *UnRegisterer {
+	return &UnRegisterer{innerReg: inner}
+}
+
+// Register registers the given collector. If it's already registered, it will
+// be unregistered and registered.
+func (u *UnRegisterer) Register(c prometheus.Collector) error {
+	if err := u.innerReg.Register(c); err != nil {
+		if _, ok := err.(prometheus.AlreadyRegisteredError); ok {
+			if ok = u.innerReg.Unregister(c); !ok {
+				panic("unable to unregister existing collector")
+			}
+			u.innerReg.MustRegister(c)
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+// Unregister unregisters the given collector.
+func (u *UnRegisterer) Unregister(c prometheus.Collector) bool {
+	return u.innerReg.Unregister(c)
+}
+
+// MustRegister registers the given collectors. It panics if an error happens.
+// Note that if a collector is already registered it will be re-registered
+// without panicking.
 func (u *UnRegisterer) MustRegister(cs ...prometheus.Collector) {
 	for _, c := range cs {
 		if err := u.Register(c); err != nil {
-			if _, ok := err.(prometheus.AlreadyRegisteredError); ok {
-				if ok = u.Unregister(c); !ok {
-					panic("unable to unregister existing collector")
-				}
-				u.Registerer.MustRegister(c)
-				continue
-			}
 			panic(err)
 		}
 	}

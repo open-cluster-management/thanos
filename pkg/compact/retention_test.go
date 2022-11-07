@@ -18,11 +18,11 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	promtest "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/prometheus/prometheus/tsdb"
+	"github.com/thanos-io/objstore"
 
 	"github.com/thanos-io/thanos/pkg/block"
 	"github.com/thanos-io/thanos/pkg/block/metadata"
 	"github.com/thanos-io/thanos/pkg/compact"
-	"github.com/thanos-io/thanos/pkg/objstore"
 	"github.com/thanos-io/thanos/pkg/testutil"
 )
 
@@ -245,7 +245,7 @@ func TestApplyRetentionPolicyByResolution(t *testing.T) {
 				uploadMockBlock(t, bkt, b.id, b.minTime, b.maxTime, int64(b.resolution))
 			}
 
-			metaFetcher, err := block.NewMetaFetcher(logger, 32, bkt, "", nil, nil, nil)
+			metaFetcher, err := block.NewMetaFetcher(logger, 32, bkt, "", nil, nil)
 			testutil.Ok(t, err)
 
 			blocksMarkedForDeletion := promauto.With(nil).NewCounter(prometheus.CounterOpts{})

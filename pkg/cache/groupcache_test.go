@@ -17,16 +17,17 @@ import (
 	"github.com/go-kit/log"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/route"
+	"github.com/thanos-io/objstore"
+	galaxyhttp "github.com/vimeo/galaxycache/http"
+	"golang.org/x/net/http2"
+
 	"github.com/thanos-io/thanos/pkg/component"
 	"github.com/thanos-io/thanos/pkg/discovery/dns"
 	"github.com/thanos-io/thanos/pkg/model"
-	"github.com/thanos-io/thanos/pkg/objstore"
 	"github.com/thanos-io/thanos/pkg/prober"
 	httpserver "github.com/thanos-io/thanos/pkg/server/http"
 	"github.com/thanos-io/thanos/pkg/store/cache/cachekey"
 	"github.com/thanos-io/thanos/pkg/testutil"
-	galaxyhttp "github.com/vimeo/galaxycache/http"
-	"golang.org/x/net/http2"
 )
 
 const basePath = `/_groupcache/`
@@ -84,11 +85,13 @@ func TestMain(m *testing.M) {
 	go func() {
 		if err = httpServer.ListenAndServe(); err != nil {
 			fmt.Printf("failed to listen: %s\n", err.Error())
+			os.Exit(1)
 		}
 	}()
 	go func() {
 		if err = httpServerH2C.ListenAndServe(); err != nil {
 			fmt.Printf("failed to listen: %s\n", err.Error())
+			os.Exit(1)
 		}
 	}()
 

@@ -30,6 +30,7 @@ import (
 	"github.com/prometheus/prometheus/config"
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/model/relabel"
+	"github.com/prometheus/prometheus/notifier"
 	"github.com/prometheus/prometheus/promql"
 	"github.com/prometheus/prometheus/rules"
 	"github.com/prometheus/prometheus/storage"
@@ -37,6 +38,7 @@ import (
 	"github.com/prometheus/prometheus/tsdb"
 	"github.com/prometheus/prometheus/tsdb/agent"
 	"github.com/prometheus/prometheus/util/strutil"
+	"github.com/thanos-io/objstore/client"
 	"gopkg.in/yaml.v2"
 
 	"github.com/thanos-io/thanos/pkg/alert"
@@ -52,7 +54,6 @@ import (
 	"github.com/thanos-io/thanos/pkg/info"
 	"github.com/thanos-io/thanos/pkg/info/infopb"
 	"github.com/thanos-io/thanos/pkg/logging"
-	"github.com/thanos-io/thanos/pkg/objstore/client"
 	"github.com/thanos-io/thanos/pkg/prober"
 	"github.com/thanos-io/thanos/pkg/promclient"
 	thanosrules "github.com/thanos-io/thanos/pkg/rules"
@@ -119,12 +120,12 @@ func registerRule(app *extkingpin.App) {
 	walCompression := cmd.Flag("tsdb.wal-compression", "Compress the tsdb WAL.").Default("true").Bool()
 
 	cmd.Flag("data-dir", "data directory").Default("data/").StringVar(&conf.dataDir)
-	cmd.Flag("rule-file", "Rule files that should be used by rule manager. Can be in glob format (repeated).").
+	cmd.Flag("rule-file", "Rule files that should be used by rule manager. Can be in glob format (repeated). Note that rules are not automatically detected, use SIGHUP or do HTTP POST /-/reload to re-read them.").
 		Default("rules/").StringsVar(&conf.ruleFiles)
 	cmd.Flag("resend-delay", "Minimum amount of time to wait before resending an alert to Alertmanager.").
 		Default("1m").DurationVar(&conf.resendDelay)
 	cmd.Flag("eval-interval", "The default evaluation interval to use.").
-		Default("30s").DurationVar(&conf.evalInterval)
+		Default("1m").DurationVar(&conf.evalInterval)
 
 	conf.rwConfig = extflag.RegisterPathOrContent(cmd, "remote-write.config", "YAML config for the remote-write configurations, that specify servers where samples should be sent to (see https://prometheus.io/docs/prometheus/latest/configuration/configuration/#remote_write). This automatically enables stateless mode for ruler and no series will be stored in the ruler's TSDB. If an empty config (or file) is provided, the flag is ignored and ruler is run with its own TSDB.", extflag.WithEnvSubstitution())
 
@@ -357,19 +358,20 @@ func runRule(
 			return errors.Wrapf(err, "failed to parse remote write config %v", string(rwCfgYAML))
 		}
 
-		walDir := filepath.Join(conf.dataDir, "wal")
 		// flushDeadline is set to 1m, but it is for metadata watcher only so not used here.
 		remoteStore := remote.NewStorage(logger, reg, func() (int64, error) {
 			return 0, nil
-		}, walDir, 1*time.Minute, nil)
+		}, conf.dataDir, 1*time.Minute, nil)
 		if err := remoteStore.ApplyConfig(&config.Config{
-			GlobalConfig:       config.DefaultGlobalConfig,
+			GlobalConfig: config.GlobalConfig{
+				ExternalLabels: labelsTSDBToProm(conf.lset),
+			},
 			RemoteWriteConfigs: rwCfg.RemoteWriteConfigs,
 		}); err != nil {
 			return errors.Wrap(err, "applying config to remote storage")
 		}
 
-		agentDB, err = agent.Open(logger, reg, remoteStore, walDir, agentOpts)
+		agentDB, err = agent.Open(logger, reg, remoteStore, conf.dataDir, agentOpts)
 		if err != nil {
 			return errors.Wrap(err, "start remote write agent db")
 		}
@@ -464,13 +466,13 @@ func runRule(
 	{
 		// Run rule evaluation and alert notifications.
 		notifyFunc := func(ctx context.Context, expr string, alerts ...*rules.Alert) {
-			res := make([]*alert.Alert, 0, len(alerts))
+			res := make([]*notifier.Alert, 0, len(alerts))
 			for _, alrt := range alerts {
 				// Only send actually firing alerts.
 				if alrt.State == rules.StatePending {
 					continue
 				}
-				a := &alert.Alert{
+				a := &notifier.Alert{
 					StartsAt:     alrt.FiredAt,
 					Labels:       alrt.Labels,
 					Annotations:  alrt.Annotations,
@@ -602,11 +604,16 @@ func runRule(
 				return tsdbStore.LabelSet()
 			}),
 			info.WithStoreInfoFunc(func() *infopb.StoreInfo {
-				mint, maxt := tsdbStore.TimeRange()
-				return &infopb.StoreInfo{
-					MinTime: mint,
-					MaxTime: maxt,
+				if httpProbe.IsReady() {
+					mint, maxt := tsdbStore.TimeRange()
+					return &infopb.StoreInfo{
+						MinTime:           mint,
+						MaxTime:           maxt,
+						SupportsSharding:  true,
+						SendsSortedSeries: true,
+					}
 				}
+				return nil
 			}),
 		)
 		options = append(options, grpcserver.WithServer(store.RegisterStoreServer(tsdbStore)))

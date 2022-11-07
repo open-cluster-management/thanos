@@ -6,6 +6,7 @@ package queryfrontend
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"math"
 	"net/http"
 	"net/url"
@@ -13,12 +14,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cortexproject/cortex/pkg/querier/queryrange"
-	cortexutil "github.com/cortexproject/cortex/pkg/util"
 	"github.com/prometheus/common/model"
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/promql/parser"
 	"github.com/weaveworks/common/httpgrpc"
+
+	"github.com/thanos-io/thanos/internal/cortex/querier/queryrange"
+	cortexutil "github.com/thanos-io/thanos/internal/cortex/util"
 
 	queryv1 "github.com/thanos-io/thanos/pkg/api/query"
 	"github.com/thanos-io/thanos/pkg/store/storepb"
@@ -53,7 +55,7 @@ func NewThanosQueryRangeCodec(partialResponse bool) *queryRangeCodec {
 	}
 }
 
-func (c queryRangeCodec) DecodeRequest(_ context.Context, r *http.Request, _ []string) (queryrange.Request, error) {
+func (c queryRangeCodec) DecodeRequest(_ context.Context, r *http.Request, forwardHeaders []string) (queryrange.Request, error) {
 	var (
 		result ThanosQueryRangeRequest
 		err    error
@@ -116,6 +118,11 @@ func (c queryRangeCodec) DecodeRequest(_ context.Context, r *http.Request, _ []s
 		return nil, err
 	}
 
+	result.ShardInfo, err = parseShardInfo(r.Form, queryv1.ShardInfoParam)
+	if err != nil {
+		return nil, err
+	}
+
 	result.Query = r.FormValue("query")
 	result.Path = r.URL.Path
 
@@ -126,6 +133,14 @@ func (c queryRangeCodec) DecodeRequest(_ context.Context, r *http.Request, _ []s
 		}
 	}
 
+	for _, header := range forwardHeaders {
+		for h, hv := range r.Header {
+			if strings.EqualFold(h, header) {
+				result.Headers = append(result.Headers, &RequestHeader{Name: h, Values: hv})
+				break
+			}
+		}
+	}
 	return &result, nil
 }
 
@@ -156,12 +171,24 @@ func (c queryRangeCodec) EncodeRequest(ctx context.Context, r queryrange.Request
 		params[queryv1.StoreMatcherParam] = matchersToStringSlice(thanosReq.StoreMatchers)
 	}
 
+	if thanosReq.ShardInfo != nil {
+		data, err := encodeShardInfo(thanosReq.ShardInfo)
+		if err != nil {
+			return nil, err
+		}
+		params[queryv1.ShardInfoParam] = []string{data}
+	}
+
 	req, err := http.NewRequest(http.MethodPost, thanosReq.Path, bytes.NewBufferString(params.Encode()))
 	if err != nil {
 		return nil, httpgrpc.Errorf(http.StatusBadRequest, "error creating request: %s", err.Error())
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-
+	for _, hv := range thanosReq.Headers {
+		for _, v := range hv.Values {
+			req.Header.Add(hv.Name, v)
+		}
+	}
 	return req.WithContext(ctx), nil
 }
 
@@ -180,7 +207,7 @@ func parseDurationMillis(s string) (int64, error) {
 }
 
 func parseEnableDedupParam(s string) (bool, error) {
-	enableDeduplication := true
+	enableDeduplication := true // Deduplication is enabled by default.
 	if s != "" {
 		var err error
 		enableDeduplication, err = strconv.ParseBool(s)
@@ -233,6 +260,24 @@ func parseMatchersParam(ss url.Values, matcherParam string) ([][]*labels.Matcher
 	return matchers, nil
 }
 
+func parseShardInfo(ss url.Values, key string) (*storepb.ShardInfo, error) {
+	data, ok := ss[key]
+	if !ok {
+		return nil, nil
+	}
+
+	if len(data) == 0 {
+		return nil, nil
+	}
+
+	var info storepb.ShardInfo
+	if err := json.Unmarshal([]byte(data[0]), &info); err != nil {
+		return nil, err
+	}
+
+	return &info, nil
+}
+
 func encodeTime(t int64) string {
 	f := float64(t) / 1.0e3
 	return strconv.FormatFloat(f, 'f', -1, 64)
@@ -249,4 +294,17 @@ func matchersToStringSlice(storeMatchers [][]*labels.Matcher) []string {
 		res = append(res, storepb.PromMatchersToString(storeMatcher...))
 	}
 	return res
+}
+
+func encodeShardInfo(info *storepb.ShardInfo) (string, error) {
+	if info == nil {
+		return "", nil
+	}
+
+	data, err := json.Marshal(info)
+	if err != nil {
+		return "", err
+	}
+
+	return string(data), nil
 }

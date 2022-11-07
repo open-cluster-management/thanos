@@ -1,9 +1,9 @@
 include .bingo/Variables.mk
 include .busybox-versions
 
-FILES_TO_FMT      ?= $(shell find . -path ./vendor -prune -o -name '*.go' -print)
+FILES_TO_FMT      ?= $(shell find . -path ./vendor -prune -o -path ./internal/cortex -prune -o -name '*.go' -print)
 MD_FILES_TO_FORMAT = $(shell find docs -name "*.md") $(shell find examples -name "*.md") $(filter-out mixin/runbook.md, $(shell find mixin -name "*.md")) $(shell ls *.md)
-FAST_MD_FILES_TO_FORMAT = $(shell git diff --name-only | grep ".md")
+FAST_MD_FILES_TO_FORMAT = $(shell git diff --name-only | grep "\.md")
 
 DOCKER_IMAGE_REPO ?= quay.io/thanos/thanos
 DOCKER_IMAGE_TAG  ?= $(subst /,-,$(shell git rev-parse --abbrev-ref HEAD))-$(shell date +%Y-%m-%d)-$(shell git rev-parse --short HEAD)
@@ -17,16 +17,25 @@ arch = $(shell uname -m)
 
 # The include .busybox-versions includes the SHA's of all the platforms, which can be used as var.
 ifeq ($(arch), x86_64)
-    # amd64
-    BASE_DOCKER_SHA=${amd64}
+	# amd64
+	BASE_DOCKER_SHA=${amd64}
 else ifeq ($(arch), armv8)
-    # arm64
-    BASE_DOCKER_SHA=${arm64}
+	# arm64
+	BASE_DOCKER_SHA=${arm64}
+else ifeq ($(arch), arm64)
+	# arm64
+	BASE_DOCKER_SHA=${arm64}
+else ifeq ($(arch), aarch64)
+        # arm64
+        BASE_DOCKER_SHA=${arm64}
+else ifeq ($(arch), ppc64le)
+	# ppc64le
+	BASE_DOCKER_SHA=${ppc64le}
 else
-    echo >&2 "only support amd64 or arm64 arch" && exit 1
+	echo >&2 "only support amd64, arm64 or ppc64le arch" && exit 1
 endif
-DOCKER_ARCHS       ?= amd64 arm64
-# Generate two target: docker-xxx-amd64, docker-xxx-arm64.
+DOCKER_ARCHS       ?= amd64 arm64 ppc64le
+# Generate three targets: docker-xxx-amd64, docker-xxx-arm64, docker-xxx-ppc64le.
 # Run make docker-xxx -n to see the result with dry run.
 BUILD_DOCKER_ARCHS = $(addprefix docker-build-,$(DOCKER_ARCHS))
 TEST_DOCKER_ARCHS  = $(addprefix docker-test-,$(DOCKER_ARCHS))
@@ -54,7 +63,7 @@ ARCH ?= $(shell uname -m)
 
 # Tools.
 PROTOC            ?= $(GOBIN)/protoc-$(PROTOC_VERSION)
-PROTOC_VERSION    ?= 3.4.0
+PROTOC_VERSION    ?= 3.20.1
 GIT               ?= $(shell which git)
 
 # Support gsed on OSX (installed via brew), falling back to sed. On Linux
@@ -82,14 +91,14 @@ define require_clean_work_tree
 
 	@if ! git diff-files --quiet --ignore-submodules --; then \
 		echo >&2 "cannot $1: you have unstaged changes."; \
-		git diff-files --name-status -r --ignore-submodules -- >&2; \
+		git diff -r --ignore-submodules -- >&2; \
 		echo >&2 "Please commit or stash them."; \
 		exit 1; \
 	fi
 
 	@if ! git diff-index --cached --quiet HEAD --ignore-submodules --; then \
 		echo >&2 "cannot $1: your index contains uncommitted changes."; \
-		git diff-index --cached --name-status -r --ignore-submodules HEAD -- >&2; \
+		git diff --cached -r --ignore-submodules HEAD -- >&2; \
 		echo >&2 "Please commit or stash them."; \
 		exit 1; \
 	fi
@@ -115,7 +124,7 @@ assets: $(GO_BINDATA) $(REACT_APP_OUTPUT_DIR)
 	@echo ">> deleting asset file"
 	@rm pkg/ui/bindata.go || true
 	@echo ">> writing assets"
-	@$(GO_BINDATA) $(bindata_flags) -pkg ui -o pkg/ui/bindata.go -ignore '(.*\.map|bootstrap\.js|bootstrap-theme\.css|bootstrap\.css)'  pkg/ui/templates/... pkg/ui/static/...
+	@$(GO_BINDATA) $(bindata_flags) -pkg ui -o pkg/ui/bindata.go  pkg/ui/static/...
 	@$(MAKE) format
 
 .PHONY: react-app-lint
@@ -151,7 +160,7 @@ ifeq ($(GIT_BRANCH), main)
 crossbuild: | $(PROMU)
 	@echo ">> crossbuilding all binaries"
 	# we only care about below two for the main branch
-	$(PROMU) crossbuild -v -p linux/amd64 -p linux/arm64
+	$(PROMU) crossbuild -v -p linux/amd64 -p linux/arm64 -p linux/ppc64le
 else
 crossbuild: | $(PROMU)
 	@echo ">> crossbuilding all binaries"
@@ -163,6 +172,25 @@ endif
 deps: ## Ensures fresh go.mod and go.sum.
 	@go mod tidy
 	@go mod verify
+
+# NOTICE: This is a temporary workaround for the cyclic dependency issue documented in:
+# https://github.com/thanos-io/thanos/issues/3832
+# The real solution is to have our own version of needed packages, or extract them out from a dedicated module.
+# vendor dependencies
+.PHONY: internal/cortex
+internal/cortex: ## Ensures the latest packages from 'cortex' are synced.
+	rm -rf internal/cortex
+	rm -rf tmp/cortex
+	git clone --depth 1 https://github.com/cortexproject/cortex tmp/cortex
+	mkdir -p internal/cortex
+	rsync -avur --delete tmp/cortex/pkg/* internal/cortex --include-from=.cortex-packages.txt
+	mkdir -p internal/cortex/integration
+	cp -R tmp/cortex/integration/ca internal/cortex/integration/ca
+	find internal/cortex -type f -exec sed -i 's/github.com\/cortexproject\/cortex\/pkg/github.com\/thanos-io\/thanos\/internal\/cortex/g' {} +
+	find internal/cortex -type f -exec sed -i 's/github.com\/cortexproject\/cortex\/integration/github.com\/thanos-io\/thanos\/internal\/cortex\/integration/g' {} +
+	rm -rf tmp/cortex
+	@echo ">> ensuring Copyright headers"
+	@go run ./scripts/copyright
 
 .PHONY: docker
 docker: ## Builds 'thanos' docker with no tag.
@@ -214,25 +242,32 @@ $(PUSH_DOCKER_ARCHS): docker-push-%:
 	@docker push "$(DOCKER_IMAGE_REPO)-linux-$*:$(DOCKER_IMAGE_TAG)"
 
 .PHONY: docs
-docs: ## Regenerates flags in docs for all thanos commands localise links, ensure GitHub format.
+docs: ## Generates docs for all thanos commands, localise links, ensure GitHub format.
 docs: build examples $(MDOX)
 	@echo ">> generating docs"
-	PATH="${PATH}:$(GOBIN)" $(MDOX) fmt -l --links.localize.address-regex="https://thanos.io/.*" --links.validate.config-file=$(MDOX_VALIDATE_CONFIG) $(MD_FILES_TO_FORMAT)
+	PATH="${PATH}:$(GOBIN)" $(MDOX) fmt --links.localize.address-regex="https://thanos.io/.*" $(MD_FILES_TO_FORMAT)
+	$(MAKE) white-noise-cleanup
 
 .PHONY: changed-docs
 changed-docs: ## Only do the docs check for files that have been changed (git status)
 changed-docs: build examples $(MDOX)
 	@echo ">> generating docs on changed files"
-	PATH="${PATH}:$(GOBIN)" $(MDOX) fmt -l --links.localize.address-regex="https://thanos.io/.*" --links.validate.config-file=$(MDOX_VALIDATE_CONFIG) $(FAST_MD_FILES_TO_FORMAT)
+	PATH="${PATH}:$(GOBIN)" $(MDOX) fmt --links.localize.address-regex="https://thanos.io/.*" $(FAST_MD_FILES_TO_FORMAT)
+	$(MAKE) white-noise-cleanup
 
 .PHONY: check-docs
-check-docs: ## checks docs against discrepancy with flags, links, white noise.
+check-docs: ## Checks docs against discrepancy with flags, links, white noise.
 check-docs: build examples $(MDOX)
-	@echo ">> checking formatting and local/remote links"
-	PATH=${PATH}:$(GOBIN) $(MDOX) fmt -l --links.localize.address-regex="https://thanos.io/.*" --links.validate.config-file=$(MDOX_VALIDATE_CONFIG) $(MD_FILES_TO_FORMAT)
-	@echo ">> detecting white noise"
-	@find . -type f \( -name "*.md" \) | SED_BIN="$(SED)" xargs scripts/cleanup-white-noise.sh
+	@echo ">> checking docs"
+	PATH="${PATH}:$(GOBIN)" $(MDOX) fmt -l --links.localize.address-regex="https://thanos.io/.*" --links.validate.config-file=$(MDOX_VALIDATE_CONFIG) $(MD_FILES_TO_FORMAT)
+	$(MAKE) white-noise-cleanup
 	$(call require_clean_work_tree,'run make docs and commit changes')
+
+.PHONY: white-noise-cleanup
+white-noise-cleanup: ## Cleans up white noise in docs.
+white-noise-cleanup:
+	@echo ">> cleaning up white noise"
+	@find . -type f \( -name "*.md" \) | SED_BIN="$(SED)" xargs scripts/cleanup-white-noise.sh
 
 .PHONY: shell-format
 shell-format: $(SHFMT)
@@ -254,7 +289,7 @@ go-format: $(GOIMPORTS)
 .PHONY: proto
 proto: ## Generates Go files from Thanos proto files.
 proto: check-git $(GOIMPORTS) $(PROTOC) $(PROTOC_GEN_GOGOFAST)
-	@GOIMPORTS_BIN="$(GOIMPORTS)" PROTOC_BIN="$(PROTOC)" PROTOC_GEN_GOGOFAST_BIN="$(PROTOC_GEN_GOGOFAST)" scripts/genproto.sh
+	@GOIMPORTS_BIN="$(GOIMPORTS)" PROTOC_BIN="$(PROTOC)" PROTOC_GEN_GOGOFAST_BIN="$(PROTOC_GEN_GOGOFAST)" PROTOC_VERSION="$(PROTOC_VERSION)" scripts/genproto.sh
 
 .PHONY: tarballs-release
 tarballs-release: ## Build tarballs.
@@ -268,16 +303,16 @@ tarballs-release: $(PROMU)
 test: ## Runs all Thanos Go unit tests against each supported version of Prometheus. This excludes tests in ./test/e2e.
 test: export GOCACHE= $(TMP_GOPATH)/gocache
 test: export THANOS_TEST_MINIO_PATH= $(MINIO)
-test: export THANOS_TEST_PROMETHEUS_PATHS= $(PROMETHEUS_ARRAY)
+test: export THANOS_TEST_PROMETHEUS_PATHS= $(PROMETHEUS)
 test: export THANOS_TEST_ALERTMANAGER_PATH= $(ALERTMANAGER)
-test: check-git install-deps
+test: check-git install-tool-deps
 	@echo ">> install thanos GOOPTS=${GOOPTS}"
-	@echo ">> running unit tests (without /test/e2e). Do export THANOS_TEST_OBJSTORE_SKIP=GCS,S3,AZURE,SWIFT,COS,ALIYUNOSS,BOS if you want to skip e2e tests against all real store buckets. Current value: ${THANOS_TEST_OBJSTORE_SKIP}"
+	@echo ">> running unit tests (without /test/e2e). Do export THANOS_TEST_OBJSTORE_SKIP=GCS,S3,AZURE,SWIFT,COS,ALIYUNOSS,BOS,OCI if you want to skip e2e tests against all real store buckets. Current value: ${THANOS_TEST_OBJSTORE_SKIP}"
 	@go test $(shell go list ./... | grep -v /vendor/ | grep -v /test/e2e);
 
 .PHONY: test-local
 test-local: ## Runs test excluding tests for ALL  object storage integrations.
-test-local: export THANOS_TEST_OBJSTORE_SKIP=GCS,S3,AZURE,SWIFT,COS,ALIYUNOSS,BOS
+test-local: export THANOS_TEST_OBJSTORE_SKIP=GCS,S3,AZURE,SWIFT,COS,ALIYUNOSS,BOS,OCI
 test-local:
 	$(MAKE) test
 
@@ -295,19 +330,19 @@ test-e2e: docker $(GOTESPLIT)
 
 .PHONY: test-e2e-local
 test-e2e-local: ## Runs all thanos e2e tests locally.
-test-e2e-local: export THANOS_TEST_OBJSTORE_SKIP=GCS,S3,AZURE,SWIFT,COS,ALIYUNOSS,BOS
+test-e2e-local: export THANOS_TEST_OBJSTORE_SKIP=GCS,S3,AZURE,SWIFT,COS,ALIYUNOSS,BOS,OCI
 test-e2e-local:
 	$(MAKE) test-e2e
 
 .PHONY: quickstart
 quickstart: ## Installs and runs a quickstart example of thanos.
-quickstart: build install-deps
+quickstart: build install-tool-deps
 quickstart:
 	scripts/quickstart.sh
 
-.PHONY: install-deps
-install-deps: ## Installs dependencies for integration tests. It installs supported versions of Prometheus and alertmanager to test against in integration tests.
-install-deps: $(ALERTMANAGER) $(MINIO) $(PROMETHEUS_ARRAY)
+.PHONY: install-tool-deps
+install-tool-deps: ## Installs dependencies for integration tests. It installs supported versions of Prometheus and alertmanager to test against in integration tests.
+install-tool-deps: $(ALERTMANAGER) $(MINIO) $(PROMETHEUS)
 	@echo ">>GOBIN=$(GOBIN)"
 
 .PHONY: check-git
@@ -360,7 +395,8 @@ github.com/prometheus/client_golang/prometheus.{DefaultGatherer,DefBuckets,NewUn
 github.com/prometheus/client_golang/prometheus.{NewCounter,NewCounterVec,NewCounterVec,NewGauge,NewGaugeVec,NewGaugeFunc,\
 NewHistorgram,NewHistogramVec,NewSummary,NewSummaryVec}=github.com/prometheus/client_golang/prometheus/promauto.{NewCounter,\
 NewCounterVec,NewCounterVec,NewGauge,NewGaugeVec,NewGaugeFunc,NewHistorgram,NewHistogramVec,NewSummary,NewSummaryVec},\
-sync/atomic=go.uber.org/atomic" ./...
+sync/atomic=go.uber.org/atomic,github.com/cortexproject/cortex=github.com/thanos-io/thanos/internal/cortex,\
+io/ioutil.{Discard,NopCloser,ReadAll,ReadDir,ReadFile,TempDir,TempFile,Writefile}" $(shell go list ./... | grep -v "internal/cortex")
 	@$(FAILLINT) -paths "fmt.{Print,Println,Sprint}" -ignore-tests ./...
 	@echo ">> linting all of the Go files GOGC=${GOGC}"
 	@$(GOLANGCI_LINT) run

@@ -25,6 +25,7 @@ type InfoServer struct {
 	getRulesInfo          func() *infopb.RulesInfo
 	getTargetsInfo        func() *infopb.TargetsInfo
 	getMetricMetadataInfo func() *infopb.MetricMetadataInfo
+	getQueryAPIInfo       func() *infopb.QueryAPIInfo
 }
 
 // NewInfoServer creates a new server instance for given component
@@ -35,6 +36,14 @@ func NewInfoServer(
 ) *InfoServer {
 	srv := &InfoServer{
 		component: component,
+		// By default, do not return info for any API.
+		getLabelSet:           func() []labelpb.ZLabelSet { return nil },
+		getStoreInfo:          func() *infopb.StoreInfo { return nil },
+		getExemplarsInfo:      func() *infopb.ExemplarsInfo { return nil },
+		getRulesInfo:          func() *infopb.RulesInfo { return nil },
+		getTargetsInfo:        func() *infopb.TargetsInfo { return nil },
+		getMetricMetadataInfo: func() *infopb.MetricMetadataInfo { return nil },
+		getQueryAPIInfo:       func() *infopb.QueryAPIInfo { return nil },
 	}
 
 	for _, o := range options {
@@ -137,6 +146,21 @@ func WithMetricMetadataInfoFunc(getMetricMetadataInfo ...func() *infopb.MetricMe
 	}
 }
 
+// WithQueryAPIInfoFunc determines the function that should be executed to obtain
+// the query information. If no function is provided, the default empty
+// query info is returned. Only the first function from the list is considered.
+func WithQueryAPIInfoFunc(queryInfo ...func() *infopb.QueryAPIInfo) ServerOptionFunc {
+	if len(queryInfo) == 0 {
+		return func(s *InfoServer) {
+			s.getQueryAPIInfo = func() *infopb.QueryAPIInfo { return &infopb.QueryAPIInfo{} }
+		}
+	}
+
+	return func(s *InfoServer) {
+		s.getQueryAPIInfo = queryInfo[0]
+	}
+}
+
 // RegisterInfoServer registers the info server.
 func RegisterInfoServer(infoSrv infopb.InfoServer) func(*grpc.Server) {
 	return func(s *grpc.Server) {
@@ -146,31 +170,7 @@ func RegisterInfoServer(infoSrv infopb.InfoServer) func(*grpc.Server) {
 
 // Info returns the information about label set and available APIs exposed by the component.
 func (srv *InfoServer) Info(ctx context.Context, req *infopb.InfoRequest) (*infopb.InfoResponse, error) {
-	if srv.getLabelSet == nil {
-		srv.getLabelSet = func() []labelpb.ZLabelSet { return nil }
-	}
-
-	if srv.getStoreInfo == nil {
-		srv.getStoreInfo = func() *infopb.StoreInfo { return nil }
-	}
-
-	if srv.getExemplarsInfo == nil {
-		srv.getExemplarsInfo = func() *infopb.ExemplarsInfo { return nil }
-	}
-
-	if srv.getRulesInfo == nil {
-		srv.getRulesInfo = func() *infopb.RulesInfo { return nil }
-	}
-
-	if srv.getTargetsInfo == nil {
-		srv.getTargetsInfo = func() *infopb.TargetsInfo { return nil }
-	}
-
-	if srv.getMetricMetadataInfo == nil {
-		srv.getMetricMetadataInfo = func() *infopb.MetricMetadataInfo { return nil }
-	}
-
-	resp := &infopb.InfoResponse{
+	return &infopb.InfoResponse{
 		LabelSets:      srv.getLabelSet(),
 		ComponentType:  srv.component,
 		Store:          srv.getStoreInfo(),
@@ -178,7 +178,6 @@ func (srv *InfoServer) Info(ctx context.Context, req *infopb.InfoRequest) (*info
 		Rules:          srv.getRulesInfo(),
 		Targets:        srv.getTargetsInfo(),
 		MetricMetadata: srv.getMetricMetadataInfo(),
-	}
-
-	return resp, nil
+		Query:          srv.getQueryAPIInfo(),
+	}, nil
 }

@@ -22,6 +22,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/common/model"
 	"github.com/prometheus/prometheus/model/labels"
+	"github.com/thanos-io/objstore/client"
 
 	"github.com/thanos-io/thanos/pkg/block/metadata"
 	"github.com/thanos-io/thanos/pkg/component"
@@ -34,7 +35,6 @@ import (
 	"github.com/thanos-io/thanos/pkg/logging"
 	meta "github.com/thanos-io/thanos/pkg/metadata"
 	thanosmodel "github.com/thanos-io/thanos/pkg/model"
-	"github.com/thanos-io/thanos/pkg/objstore/client"
 	"github.com/thanos-io/thanos/pkg/prober"
 	"github.com/thanos-io/thanos/pkg/promclient"
 	"github.com/thanos-io/thanos/pkg/reloader"
@@ -216,8 +216,8 @@ func runSidecar(
 
 			// Periodically query the Prometheus config. We use this as a heartbeat as well as for updating
 			// the external labels we apply.
-			return runutil.Repeat(30*time.Second, ctx.Done(), func() error {
-				iterCtx, iterCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			return runutil.Repeat(conf.prometheus.getConfigInterval, ctx.Done(), func() error {
+				iterCtx, iterCancel := context.WithTimeout(context.Background(), conf.prometheus.getConfigTimeout)
 				defer iterCancel()
 
 				if err := m.UpdateLabels(iterCtx); err != nil {
@@ -265,11 +265,16 @@ func runSidecar(
 				return promStore.LabelSet()
 			}),
 			info.WithStoreInfoFunc(func() *infopb.StoreInfo {
-				mint, maxt := promStore.Timestamps()
-				return &infopb.StoreInfo{
-					MinTime: mint,
-					MaxTime: maxt,
+				if httpProbe.IsReady() {
+					mint, maxt := promStore.Timestamps()
+					return &infopb.StoreInfo{
+						MinTime:           mint,
+						MaxTime:           maxt,
+						SupportsSharding:  true,
+						SendsSortedSeries: true,
+					}
 				}
+				return nil
 			}),
 			info.WithExemplarsInfoFunc(),
 			info.WithRulesInfoFunc(),

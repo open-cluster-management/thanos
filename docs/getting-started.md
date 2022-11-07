@@ -40,7 +40,7 @@ Thanos can **not** be downloaded nor installed via the `go get` or `go install` 
 
 Thanos uses the directive *replace*. The reason is to provide a way to unblock ourselves promptly while also being flexible in the packages that we (re)use. Support for `go install` is not likely at this point.
 
-If you want to build Thanos from source you would need a working installation of the Go 1.17+ [toolchain](https://github.com/golang/tools) (`GOPATH`, `PATH=${GOPATH}/bin:${PATH}`). Next one should make a clone of our repository:
+If you want to build Thanos from source you would need a working installation of the Go 1.18+ [toolchain](https://github.com/golang/tools) (`GOPATH`, `PATH=${GOPATH}/bin:${PATH}`). Next one should make a clone of our repository:
 
 ```
 git clone git@github.com:thanos-io/thanos.git
@@ -79,7 +79,7 @@ If you want to add yourself to this list, let us know!
 
 ## Deploying Thanos
 
-* [WIP] Detailed, free, in-browser interactive tutorial [as Katacoda Thanos Course](https://katacoda.com/thanos/courses/thanos/1-globalview)
+* [WIP] Detailed, free, in-browser interactive tutorial [as Killercoda Thanos Course](https://killercoda.com/thanos/)
 * [Quick Tutorial](quick-tutorial.md) on Thanos website.
 
 ## Operating
@@ -88,6 +88,7 @@ See up to date [jsonnet mixins](https://github.com/thanos-io/thanos/tree/main/mi
 
 ## Talks
 
+* 10.2021: [Adopting Thanos gradually across all of LastPass infrastructures](https://www.youtube.com/watch?v=Ddq8m04594A)
 * 12.2020: [Absorbing Thanos Infinite Powers for Multi-Cluster Telemetry](https://www.youtube.com/watch?v=6Nx2BFyr7qQ)
 * 12.2020: [Turn It Up to a Million: Ingesting Millions of Metrics with Thanos Receive](https://www.youtube.com/watch?v=5MJqdJq41Ms)
 * 02.2018: [Very first Prometheus Meetup Slides](https://www.slideshare.net/BartomiejPotka/thanos-global-durable-prometheus-monitoring)
@@ -99,6 +100,14 @@ See up to date [jsonnet mixins](https://github.com/thanos-io/thanos/tree/main/mi
 * 2019: [Prometheus in Practice: HA with Thanos](https://www.slideshare.net/ThomasRiley45/prometheus-in-practice-high-availability-with-thanos-devopsdays-edinburgh-2019)
 
 ## Blog posts
+
+* 2022:
+
+  * [Leveraging Consul for Thanos Query Discovery](https://nicolastakashi.medium.com/leveraging-consul-for-thanos-query-discovery-34212d496c88)
+
+* 2021:
+
+  * [Adopting Thanos at LastPass](https://krisztianfekete.org/adopting-thanos-at-lastpass/)
 
 * 2020:
 
@@ -117,7 +126,7 @@ See up to date [jsonnet mixins](https://github.com/thanos-io/thanos/tree/main/mi
 
 * 2018:
 
-  * [Introduction blog post](https://improbable.io/games/blog/thanos-prometheus-at-scale)
+  * [Introduction blog post](https://improbable.io/blog/thanos-prometheus-at-scale)
   * [Monzo user story](https://monzo.com/blog/2018/07/27/how-we-monitor-monzo)
   * [Banzai Cloud hand's on](https://banzaicloud.com/blog/hands-on-thanos/)
   * [uSwitch user story](https://medium.com/uswitch-labs/making-prometheus-more-awesome-with-thanos-fbec8c6c28ad)

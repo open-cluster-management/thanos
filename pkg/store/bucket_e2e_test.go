@@ -6,7 +6,6 @@ package store
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,11 +24,12 @@ import (
 	"github.com/weaveworks/common/httpgrpc"
 	"google.golang.org/grpc/codes"
 
+	"github.com/thanos-io/objstore"
+	"github.com/thanos-io/objstore/objtesting"
+
 	"github.com/thanos-io/thanos/pkg/block"
 	"github.com/thanos-io/thanos/pkg/block/metadata"
 	"github.com/thanos-io/thanos/pkg/model"
-	"github.com/thanos-io/thanos/pkg/objstore"
-	"github.com/thanos-io/thanos/pkg/objstore/objtesting"
 	storecache "github.com/thanos-io/thanos/pkg/store/cache"
 	"github.com/thanos-io/thanos/pkg/store/labelpb"
 	"github.com/thanos-io/thanos/pkg/store/storepb"
@@ -177,7 +177,7 @@ func prepareStoreWithTestBlocks(t testing.TB, dir string, bkt objstore.Bucket, m
 	metaFetcher, err := block.NewMetaFetcher(s.logger, 20, objstore.WithNoopInstr(bkt), dir, nil, []block.MetadataFilter{
 		block.NewTimePartitionMetaFilter(filterConf.MinTime, filterConf.MaxTime),
 		block.NewLabelShardedMetaFilter(relabelConfig),
-	}, nil)
+	})
 	testutil.Ok(t, err)
 
 	reg := prometheus.NewRegistry()
@@ -484,9 +484,7 @@ func TestBucketStore_e2e(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		dir, err := ioutil.TempDir("", "test_bucketstore_e2e")
-		testutil.Ok(t, err)
-		defer func() { testutil.Ok(t, os.RemoveAll(dir)) }()
+		dir := t.TempDir()
 
 		s := prepareStoreWithTestBlocks(t, dir, bkt, false, NewChunksLimiterFactory(0), NewSeriesLimiterFactory(0), emptyRelabelConfig, allowAllFilterConf)
 
@@ -539,9 +537,7 @@ func TestBucketStore_ManyParts_e2e(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		dir, err := ioutil.TempDir("", "test_bucketstore_e2e")
-		testutil.Ok(t, err)
-		defer func() { testutil.Ok(t, os.RemoveAll(dir)) }()
+		dir := t.TempDir()
 
 		s := prepareStoreWithTestBlocks(t, dir, bkt, true, NewChunksLimiterFactory(0), NewSeriesLimiterFactory(0), emptyRelabelConfig, allowAllFilterConf)
 
@@ -561,9 +557,7 @@ func TestBucketStore_TimePartitioning_e2e(t *testing.T) {
 	defer cancel()
 	bkt := objstore.NewInMemBucket()
 
-	dir, err := ioutil.TempDir("", "test_bucket_time_part_e2e")
-	testutil.Ok(t, err)
-	defer func() { testutil.Ok(t, os.RemoveAll(dir)) }()
+	dir := t.TempDir()
 
 	hourAfter := time.Now().Add(1 * time.Hour)
 	filterMaxTime := model.TimeOrDurationValue{Time: &hourAfter}
@@ -648,9 +642,7 @@ func TestBucketStore_Series_ChunksLimiter_e2e(t *testing.T) {
 			defer cancel()
 			bkt := objstore.NewInMemBucket()
 
-			dir, err := ioutil.TempDir("", "test_bucket_chunks_limiter_e2e")
-			testutil.Ok(t, err)
-			defer func() { testutil.Ok(t, os.RemoveAll(dir)) }()
+			dir := t.TempDir()
 
 			s := prepareStoreWithTestBlocks(t, dir, bkt, false, newCustomChunksLimiterFactory(testData.maxChunksLimit, testData.code), newCustomSeriesLimiterFactory(testData.maxSeriesLimit, testData.code), emptyRelabelConfig, allowAllFilterConf)
 			testutil.Ok(t, s.store.SyncBlocks(ctx))
@@ -665,7 +657,7 @@ func TestBucketStore_Series_ChunksLimiter_e2e(t *testing.T) {
 
 			s.cache.SwapWith(noopCache{})
 			srv := newStoreSeriesServer(ctx)
-			err = s.store.Series(req, srv)
+			err := s.store.Series(req, srv)
 
 			if testData.expectedErr == "" {
 				testutil.Ok(t, err)
@@ -685,9 +677,7 @@ func TestBucketStore_LabelNames_e2e(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		dir, err := ioutil.TempDir("", "test_bucketstore_label_names_e2e")
-		testutil.Ok(t, err)
-		defer func() { testutil.Ok(t, os.RemoveAll(dir)) }()
+		dir := t.TempDir()
 
 		s := prepareStoreWithTestBlocks(t, dir, bkt, false, NewChunksLimiterFactory(0), NewSeriesLimiterFactory(0), emptyRelabelConfig, allowAllFilterConf)
 		s.cache.SwapWith(noopCache{})
@@ -787,9 +777,7 @@ func TestBucketStore_LabelValues_e2e(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		dir, err := ioutil.TempDir("", "test_bucketstore_label_values_e2e")
-		testutil.Ok(t, err)
-		defer func() { testutil.Ok(t, os.RemoveAll(dir)) }()
+		dir := t.TempDir()
 
 		s := prepareStoreWithTestBlocks(t, dir, bkt, false, NewChunksLimiterFactory(0), NewSeriesLimiterFactory(0), emptyRelabelConfig, allowAllFilterConf)
 		s.cache.SwapWith(noopCache{})

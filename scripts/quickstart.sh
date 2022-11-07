@@ -36,12 +36,12 @@ if [ -n "${MINIO_ENABLED}" ]; then
     exit 1
   fi
 
-  export MINIO_ACCESS_KEY="THANOS"
-  export MINIO_SECRET_KEY="ITSTHANOSTIME"
+  export MINIO_ROOT_USER="THANOS"
+  export MINIO_ROOT_PASSWORD="ITSTHANOSTIME"
   export MINIO_ENDPOINT="127.0.0.1:9000"
   export MINIO_BUCKET="thanos"
-  export S3_ACCESS_KEY=${MINIO_ACCESS_KEY}
-  export S3_SECRET_KEY=${MINIO_SECRET_KEY}
+  export S3_ACCESS_KEY=${MINIO_ROOT_USER}
+  export S3_SECRET_KEY=${MINIO_ROOT_USER}
   export S3_BUCKET=${MINIO_BUCKET}
   export S3_ENDPOINT=${MINIO_ENDPOINT}
   export S3_INSECURE="true"
@@ -169,9 +169,9 @@ if [ -n "${GCS_BUCKET}" -o -n "${S3_ENDPOINT}" ]; then
   cat >groupcache.yml <<-EOF
 		type: GROUPCACHE
 config:
-  self_url: http://localhost:10906/
+  self_url: http://localhost:10906
   peers:
-    - http://localhost:10906/
+    - http://localhost:10906
   groupcache_group: groupcache_test_group
 blocks_iter_ttl: 0s
 metafile_exists_ttl: 0s

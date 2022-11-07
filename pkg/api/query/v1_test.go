@@ -21,7 +21,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"math"
 	"math/rand"
 	"net/http"
@@ -45,10 +44,8 @@ import (
 	"github.com/prometheus/prometheus/tsdb/tsdbutil"
 	promgate "github.com/prometheus/prometheus/util/gate"
 	"github.com/prometheus/prometheus/util/stats"
-
-	"github.com/thanos-io/thanos/pkg/compact"
-
 	baseAPI "github.com/thanos-io/thanos/pkg/api"
+	"github.com/thanos-io/thanos/pkg/compact"
 	"github.com/thanos-io/thanos/pkg/component"
 	"github.com/thanos-io/thanos/pkg/gate"
 	"github.com/thanos-io/thanos/pkg/query"
@@ -110,7 +107,8 @@ func testEndpoint(t *testing.T, test endpointTestCase, name string, responseComp
 			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		}
 
-		resp, _, apiErr := test.endpoint(req.WithContext(ctx))
+		resp, _, apiErr, releaseResources := test.endpoint(req.WithContext(ctx))
+		defer releaseResources()
 		if apiErr != nil {
 			if test.errType == baseAPI.ErrorNone {
 				t.Fatalf("Unexpected error: %s", apiErr)
@@ -191,15 +189,15 @@ func TestQueryEndpoints(t *testing.T) {
 		baseAPI: &baseAPI.BaseAPI{
 			Now: func() time.Time { return now },
 		},
-		queryableCreate: query.NewQueryableCreator(nil, nil, store.NewTSDBStore(nil, db, component.Query, nil), 2, timeout),
-		queryEngine: func(int64) *promql.Engine {
-			return qe
-		},
+		queryableCreate:       query.NewQueryableCreator(nil, nil, store.NewTSDBStore(nil, db, component.Query, nil), 2, timeout),
+		queryEngine:           qe,
+		lookbackDeltaCreate:   func(m int64) time.Duration { return time.Duration(0) },
 		gate:                  gate.New(nil, 4),
 		defaultRangeQueryStep: time.Second,
 		queryRangeHist: promauto.With(prometheus.NewRegistry()).NewHistogram(prometheus.HistogramOpts{
 			Name: "query_range_hist",
 		}),
+		seriesStatsAggregator: &store.NoopSeriesStatsAggregator{},
 	}
 
 	start := time.Unix(0, 0)
@@ -611,6 +609,7 @@ func TestQueryEndpoints(t *testing.T) {
 		}
 	}
 
+	qs := &stats.BuiltinStats{}
 	tests = []endpointTestCase{
 		{
 			endpoint: api.query,
@@ -628,7 +627,7 @@ func TestQueryEndpoints(t *testing.T) {
 				"stats": []string{"true"},
 			},
 			response: &queryData{
-				Stats: &stats.QueryStats{},
+				Stats: qs,
 			},
 		},
 	}
@@ -679,8 +678,7 @@ func TestMetadataEndpoints(t *testing.T) {
 		},
 	}
 
-	dir, err := ioutil.TempDir("", "prometheus-test")
-	testutil.Ok(t, err)
+	dir := t.TempDir()
 
 	const chunkRange int64 = 600_000
 	var series []storage.Series
@@ -698,7 +696,7 @@ func TestMetadataEndpoints(t *testing.T) {
 		series = append(series, storage.NewListSeries(lbl, samples))
 	}
 
-	_, err = tsdb.CreateBlock(series, dir, chunkRange, log.NewNopLogger())
+	_, err := tsdb.CreateBlock(series, dir, chunkRange, log.NewNopLogger())
 	testutil.Ok(t, err)
 
 	opts := tsdb.DefaultOptions()
@@ -732,28 +730,28 @@ func TestMetadataEndpoints(t *testing.T) {
 		baseAPI: &baseAPI.BaseAPI{
 			Now: func() time.Time { return now },
 		},
-		queryableCreate: query.NewQueryableCreator(nil, nil, store.NewTSDBStore(nil, db, component.Query, nil), 2, timeout),
-		queryEngine: func(int64) *promql.Engine {
-			return qe
-		},
-		gate: gate.New(nil, 4),
+		queryableCreate:     query.NewQueryableCreator(nil, nil, store.NewTSDBStore(nil, db, component.Query, nil), 2, timeout),
+		queryEngine:         qe,
+		lookbackDeltaCreate: func(m int64) time.Duration { return time.Duration(0) },
+		gate:                gate.New(nil, 4),
 		queryRangeHist: promauto.With(prometheus.NewRegistry()).NewHistogram(prometheus.HistogramOpts{
 			Name: "query_range_hist",
 		}),
+		seriesStatsAggregator: &store.NoopSeriesStatsAggregator{},
 	}
 	apiWithLabelLookback := &QueryAPI{
 		baseAPI: &baseAPI.BaseAPI{
 			Now: func() time.Time { return now },
 		},
-		queryableCreate: query.NewQueryableCreator(nil, nil, store.NewTSDBStore(nil, db, component.Query, nil), 2, timeout),
-		queryEngine: func(int64) *promql.Engine {
-			return qe
-		},
+		queryableCreate:          query.NewQueryableCreator(nil, nil, store.NewTSDBStore(nil, db, component.Query, nil), 2, timeout),
+		queryEngine:              qe,
+		lookbackDeltaCreate:      func(m int64) time.Duration { return time.Duration(0) },
 		gate:                     gate.New(nil, 4),
 		defaultMetadataTimeRange: apiLookbackDelta,
 		queryRangeHist: promauto.With(prometheus.NewRegistry()).NewHistogram(prometheus.HistogramOpts{
 			Name: "query_range_hist",
 		}),
+		seriesStatsAggregator: &store.NoopSeriesStatsAggregator{},
 	}
 
 	var tests = []endpointTestCase{
@@ -1713,7 +1711,7 @@ func TestRulesHandler(t *testing.T) {
 			Type:           "alerting",
 		},
 	}
-	var tests = []test{
+	for _, test := range []test{
 		{
 			response: &testpromcompatibility.RuleDiscovery{
 				RuleGroups: []*testpromcompatibility.RuleGroup{
@@ -1770,9 +1768,7 @@ func TestRulesHandler(t *testing.T) {
 				},
 			},
 		},
-	}
-
-	for _, test := range tests {
+	} {
 		t.Run(fmt.Sprintf("endpoint=%s/method=%s/query=%q", "rules", http.MethodGet, test.query.Encode()), func(t *testing.T) {
 			// Build a context with the correct request params.
 			ctx := context.Background()
@@ -1784,7 +1780,8 @@ func TestRulesHandler(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			res, errors, apiError := endpoint(req.WithContext(ctx))
+			res, errors, apiError, releaseResources := endpoint(req.WithContext(ctx))
+			defer releaseResources()
 			if errors != nil {
 				t.Fatalf("Unexpected errors: %s", errors)
 				return

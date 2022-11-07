@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/efficientgo/e2e"
+	e2emon "github.com/efficientgo/e2e/monitoring"
 	"github.com/go-kit/log"
 	"github.com/pkg/errors"
 
@@ -27,40 +28,38 @@ import (
 func TestTargetsAPI_Fanout(t *testing.T) {
 	t.Parallel()
 
-	e, err := e2e.NewDockerEnvironment("e2e_test_targets_fanout")
+	e, err := e2e.NewDockerEnvironment("targets-fanout")
 	testutil.Ok(t, err)
 	t.Cleanup(e2ethanos.CleanScenario(t, e))
 
 	// 2x Prometheus.
-	prom1, sidecar1, err := e2ethanos.NewPrometheusWithSidecar(
+	prom1, sidecar1 := e2ethanos.NewPrometheusWithSidecar(
 		e,
 		"prom1",
-		defaultPromConfig("ha", 0, "", "", "localhost:9090", "localhost:80"),
+		e2ethanos.DefaultPromConfig("ha", 0, "", "", e2ethanos.LocalPrometheusTarget, "localhost:80"),
 		"",
-		e2ethanos.DefaultPrometheusImage(),
+		e2ethanos.DefaultPrometheusImage(), "",
 	)
-	testutil.Ok(t, err)
-	prom2, sidecar2, err := e2ethanos.NewPrometheusWithSidecar(
+	prom2, sidecar2 := e2ethanos.NewPrometheusWithSidecar(
 		e,
 		"prom2",
-		defaultPromConfig("ha", 1, "", "", "localhost:9090", "localhost:80"),
+		e2ethanos.DefaultPromConfig("ha", 1, "", "", e2ethanos.LocalPrometheusTarget, "localhost:80"),
 		"",
-		e2ethanos.DefaultPrometheusImage(),
+		e2ethanos.DefaultPrometheusImage(), "",
 	)
-	testutil.Ok(t, err)
 	testutil.Ok(t, e2e.StartAndWaitReady(prom1, sidecar1, prom2, sidecar2))
 
 	stores := []string{sidecar1.InternalEndpoint("grpc"), sidecar2.InternalEndpoint("grpc")}
-	q, err := e2ethanos.NewQuerierBuilder(e, "query", stores...).
+	q := e2ethanos.NewQuerierBuilder(e, "query", stores...).
 		WithTargetAddresses(stores...).
-		Build()
+		Init()
 	testutil.Ok(t, err)
 	testutil.Ok(t, e2e.StartAndWaitReady(q))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Minute)
 	t.Cleanup(cancel)
 
-	testutil.Ok(t, q.WaitSumMetricsWithOptions(e2e.Equals(2), []string{"thanos_store_nodes_grpc_connections"}, e2e.WaitMissingMetrics()))
+	testutil.Ok(t, q.WaitSumMetricsWithOptions(e2emon.Equals(2), []string{"thanos_store_nodes_grpc_connections"}, e2emon.WaitMissingMetrics()))
 
 	targetAndAssert(t, ctx, q.Endpoint("http"), "", &targetspb.TargetDiscovery{
 		ActiveTargets: []*targetspb.ActiveTarget{
@@ -69,6 +68,8 @@ func TestTargetsAPI_Fanout(t *testing.T) {
 					{Name: "__address__", Value: "localhost:9090"},
 					{Name: "__metrics_path__", Value: "/metrics"},
 					{Name: "__scheme__", Value: "http"},
+					{Name: "__scrape_interval__", Value: "1s"},
+					{Name: "__scrape_timeout__", Value: "1s"},
 					{Name: "job", Value: "myself"},
 					{Name: "prometheus", Value: "ha"},
 				}},
@@ -88,6 +89,8 @@ func TestTargetsAPI_Fanout(t *testing.T) {
 					{Name: "__address__", Value: "localhost:80"},
 					{Name: "__metrics_path__", Value: "/metrics"},
 					{Name: "__scheme__", Value: "http"},
+					{Name: "__scrape_interval__", Value: "1s"},
+					{Name: "__scrape_timeout__", Value: "1s"},
 					{Name: "job", Value: "myself"},
 					{Name: "prometheus", Value: "ha"},
 				}},
@@ -103,7 +106,7 @@ func targetAndAssert(t *testing.T, ctx context.Context, addr, state string, want
 
 	logger := log.NewLogfmtLogger(os.Stdout)
 	testutil.Ok(t, runutil.RetryWithLog(logger, time.Second, ctx.Done(), func() error {
-		res, err := promclient.NewDefaultClient().TargetsInGRPC(ctx, mustURLParse(t, "http://"+addr), state)
+		res, err := promclient.NewDefaultClient().TargetsInGRPC(ctx, urlParse(t, "http://"+addr), state)
 		if err != nil {
 			return err
 		}

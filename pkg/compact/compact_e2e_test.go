@@ -8,7 +8,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path"
 	"path/filepath"
@@ -24,12 +23,12 @@ import (
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/tsdb"
+	"github.com/thanos-io/objstore"
+	"github.com/thanos-io/objstore/objtesting"
 
 	"github.com/thanos-io/thanos/pkg/block"
 	"github.com/thanos-io/thanos/pkg/block/metadata"
 	"github.com/thanos-io/thanos/pkg/dedup"
-	"github.com/thanos-io/thanos/pkg/objstore"
-	"github.com/thanos-io/thanos/pkg/objstore/objtesting"
 	"github.com/thanos-io/thanos/pkg/testutil"
 	"github.com/thanos-io/thanos/pkg/testutil/e2eutil"
 )
@@ -94,17 +93,17 @@ func TestSyncer_GarbageCollect_e2e(t *testing.T) {
 			testutil.Ok(t, bkt.Upload(ctx, path.Join(m.ULID.String(), metadata.MetaFilename), &buf))
 		}
 
-		duplicateBlocksFilter := block.NewDeduplicateFilter()
+		duplicateBlocksFilter := block.NewDeduplicateFilter(fetcherConcurrency)
 		metaFetcher, err := block.NewMetaFetcher(nil, 32, objstore.WithNoopInstr(bkt), "", nil, []block.MetadataFilter{
 			duplicateBlocksFilter,
-		}, nil)
+		})
 		testutil.Ok(t, err)
 
 		blocksMarkedForDeletion := promauto.With(nil).NewCounter(prometheus.CounterOpts{})
 		garbageCollectedBlocks := promauto.With(nil).NewCounter(prometheus.CounterOpts{})
 		blockMarkedForNoCompact := promauto.With(nil).NewCounter(prometheus.CounterOpts{})
 		ignoreDeletionMarkFilter := block.NewIgnoreDeletionMarkFilter(nil, nil, 48*time.Hour, fetcherConcurrency)
-		sy, err := NewMetaSyncer(nil, nil, bkt, metaFetcher, duplicateBlocksFilter, ignoreDeletionMarkFilter, blocksMarkedForDeletion, garbageCollectedBlocks, 1)
+		sy, err := NewMetaSyncer(nil, nil, bkt, metaFetcher, duplicateBlocksFilter, ignoreDeletionMarkFilter, blocksMarkedForDeletion, garbageCollectedBlocks)
 		testutil.Ok(t, err)
 
 		// Do one initial synchronization with the bucket.
@@ -139,7 +138,7 @@ func TestSyncer_GarbageCollect_e2e(t *testing.T) {
 		testutil.Ok(t, sy.GarbageCollect(ctx))
 
 		// Only the level 3 block, the last source block in both resolutions should be left.
-		grouper := NewDefaultGrouper(nil, bkt, false, false, nil, blocksMarkedForDeletion, garbageCollectedBlocks, blockMarkedForNoCompact, metadata.NoneFunc)
+		grouper := NewDefaultGrouper(nil, bkt, false, false, nil, blocksMarkedForDeletion, garbageCollectedBlocks, blockMarkedForNoCompact, metadata.NoneFunc, 10, 10)
 		groups, err := grouper.Groups(sy.Metas())
 		testutil.Ok(t, err)
 
@@ -186,35 +185,33 @@ func testGroupCompactE2e(t *testing.T, mergeFunc storage.VerticalChunkSeriesMerg
 		defer cancel()
 
 		// Create fresh, empty directory for actual test.
-		dir, err := ioutil.TempDir("", "test-compact")
-		testutil.Ok(t, err)
-		defer func() { testutil.Ok(t, os.RemoveAll(dir)) }()
+		dir := t.TempDir()
 
 		logger := log.NewLogfmtLogger(os.Stderr)
 
 		reg := prometheus.NewRegistry()
 
 		ignoreDeletionMarkFilter := block.NewIgnoreDeletionMarkFilter(logger, objstore.WithNoopInstr(bkt), 48*time.Hour, fetcherConcurrency)
-		duplicateBlocksFilter := block.NewDeduplicateFilter()
+		duplicateBlocksFilter := block.NewDeduplicateFilter(fetcherConcurrency)
 		noCompactMarkerFilter := NewGatherNoCompactionMarkFilter(logger, objstore.WithNoopInstr(bkt), 2)
 		metaFetcher, err := block.NewMetaFetcher(nil, 32, objstore.WithNoopInstr(bkt), "", nil, []block.MetadataFilter{
 			ignoreDeletionMarkFilter,
 			duplicateBlocksFilter,
 			noCompactMarkerFilter,
-		}, nil)
+		})
 		testutil.Ok(t, err)
 
 		blocksMarkedForDeletion := promauto.With(nil).NewCounter(prometheus.CounterOpts{})
 		blocksMaredForNoCompact := promauto.With(nil).NewCounter(prometheus.CounterOpts{})
 		garbageCollectedBlocks := promauto.With(nil).NewCounter(prometheus.CounterOpts{})
-		sy, err := NewMetaSyncer(nil, nil, bkt, metaFetcher, duplicateBlocksFilter, ignoreDeletionMarkFilter, blocksMarkedForDeletion, garbageCollectedBlocks, 5)
+		sy, err := NewMetaSyncer(nil, nil, bkt, metaFetcher, duplicateBlocksFilter, ignoreDeletionMarkFilter, blocksMarkedForDeletion, garbageCollectedBlocks)
 		testutil.Ok(t, err)
 
 		comp, err := tsdb.NewLeveledCompactor(ctx, reg, logger, []int64{1000, 3000}, nil, mergeFunc)
 		testutil.Ok(t, err)
 
 		planner := NewPlanner(logger, []int64{1000, 3000}, noCompactMarkerFilter)
-		grouper := NewDefaultGrouper(logger, bkt, false, false, reg, blocksMarkedForDeletion, garbageCollectedBlocks, blocksMaredForNoCompact, metadata.NoneFunc)
+		grouper := NewDefaultGrouper(logger, bkt, false, false, reg, blocksMarkedForDeletion, garbageCollectedBlocks, blocksMaredForNoCompact, metadata.NoneFunc, 10, 10)
 		bComp, err := NewBucketCompactor(logger, sy, grouper, planner, comp, dir, bkt, 2, true)
 		testutil.Ok(t, err)
 
@@ -319,31 +316,34 @@ func testGroupCompactE2e(t *testing.T, mergeFunc storage.VerticalChunkSeriesMerg
 			},
 		})
 
+		groupKey1 := metas[0].Thanos.GroupKey()
+		groupKey2 := metas[6].Thanos.GroupKey()
+
 		testutil.Ok(t, bComp.Compact(ctx))
 		testutil.Equals(t, 5.0, promtest.ToFloat64(sy.metrics.garbageCollectedBlocks))
 		testutil.Equals(t, 5.0, promtest.ToFloat64(sy.metrics.blocksMarkedForDeletion))
 		testutil.Equals(t, 1.0, promtest.ToFloat64(grouper.blocksMarkedForNoCompact))
 		testutil.Equals(t, 0.0, promtest.ToFloat64(sy.metrics.garbageCollectionFailures))
 		testutil.Equals(t, 4, MetricCount(grouper.compactions))
-		testutil.Equals(t, 1.0, promtest.ToFloat64(grouper.compactions.WithLabelValues(DefaultGroupKey(metas[0].Thanos))))
-		testutil.Equals(t, 1.0, promtest.ToFloat64(grouper.compactions.WithLabelValues(DefaultGroupKey(metas[7].Thanos))))
-		testutil.Equals(t, 0.0, promtest.ToFloat64(grouper.compactions.WithLabelValues(DefaultGroupKey(metas[4].Thanos))))
-		testutil.Equals(t, 0.0, promtest.ToFloat64(grouper.compactions.WithLabelValues(DefaultGroupKey(metas[5].Thanos))))
+		testutil.Equals(t, 1.0, promtest.ToFloat64(grouper.compactions.WithLabelValues(metas[0].Thanos.GroupKey())))
+		testutil.Equals(t, 1.0, promtest.ToFloat64(grouper.compactions.WithLabelValues(metas[7].Thanos.GroupKey())))
+		testutil.Equals(t, 0.0, promtest.ToFloat64(grouper.compactions.WithLabelValues(metas[4].Thanos.GroupKey())))
+		testutil.Equals(t, 0.0, promtest.ToFloat64(grouper.compactions.WithLabelValues(metas[5].Thanos.GroupKey())))
 		testutil.Equals(t, 4, MetricCount(grouper.compactionRunsStarted))
-		testutil.Equals(t, 3.0, promtest.ToFloat64(grouper.compactionRunsStarted.WithLabelValues(DefaultGroupKey(metas[0].Thanos))))
-		testutil.Equals(t, 3.0, promtest.ToFloat64(grouper.compactionRunsStarted.WithLabelValues(DefaultGroupKey(metas[7].Thanos))))
-		testutil.Equals(t, 0.0, promtest.ToFloat64(grouper.compactionRunsStarted.WithLabelValues(DefaultGroupKey(metas[4].Thanos))))
-		testutil.Equals(t, 0.0, promtest.ToFloat64(grouper.compactionRunsStarted.WithLabelValues(DefaultGroupKey(metas[5].Thanos))))
+		testutil.Equals(t, 3.0, promtest.ToFloat64(grouper.compactionRunsStarted.WithLabelValues(metas[0].Thanos.GroupKey())))
+		testutil.Equals(t, 3.0, promtest.ToFloat64(grouper.compactionRunsStarted.WithLabelValues(metas[7].Thanos.GroupKey())))
+		testutil.Equals(t, 0.0, promtest.ToFloat64(grouper.compactionRunsStarted.WithLabelValues(metas[4].Thanos.GroupKey())))
+		testutil.Equals(t, 0.0, promtest.ToFloat64(grouper.compactionRunsStarted.WithLabelValues(metas[5].Thanos.GroupKey())))
 		testutil.Equals(t, 4, MetricCount(grouper.compactionRunsCompleted))
-		testutil.Equals(t, 2.0, promtest.ToFloat64(grouper.compactionRunsCompleted.WithLabelValues(DefaultGroupKey(metas[0].Thanos))))
-		testutil.Equals(t, 3.0, promtest.ToFloat64(grouper.compactionRunsCompleted.WithLabelValues(DefaultGroupKey(metas[7].Thanos))))
-		testutil.Equals(t, 0.0, promtest.ToFloat64(grouper.compactionRunsCompleted.WithLabelValues(DefaultGroupKey(metas[4].Thanos))))
-		testutil.Equals(t, 0.0, promtest.ToFloat64(grouper.compactionRunsCompleted.WithLabelValues(DefaultGroupKey(metas[5].Thanos))))
+		testutil.Equals(t, 2.0, promtest.ToFloat64(grouper.compactionRunsCompleted.WithLabelValues(metas[0].Thanos.GroupKey())))
+		testutil.Equals(t, 3.0, promtest.ToFloat64(grouper.compactionRunsCompleted.WithLabelValues(metas[7].Thanos.GroupKey())))
+		testutil.Equals(t, 0.0, promtest.ToFloat64(grouper.compactionRunsCompleted.WithLabelValues(metas[4].Thanos.GroupKey())))
+		testutil.Equals(t, 0.0, promtest.ToFloat64(grouper.compactionRunsCompleted.WithLabelValues(metas[5].Thanos.GroupKey())))
 		testutil.Equals(t, 4, MetricCount(grouper.compactionFailures))
-		testutil.Equals(t, 1.0, promtest.ToFloat64(grouper.compactionFailures.WithLabelValues(DefaultGroupKey(metas[0].Thanos))))
-		testutil.Equals(t, 0.0, promtest.ToFloat64(grouper.compactionFailures.WithLabelValues(DefaultGroupKey(metas[7].Thanos))))
-		testutil.Equals(t, 0.0, promtest.ToFloat64(grouper.compactionFailures.WithLabelValues(DefaultGroupKey(metas[4].Thanos))))
-		testutil.Equals(t, 0.0, promtest.ToFloat64(grouper.compactionFailures.WithLabelValues(DefaultGroupKey(metas[5].Thanos))))
+		testutil.Equals(t, 1.0, promtest.ToFloat64(grouper.compactionFailures.WithLabelValues(metas[0].Thanos.GroupKey())))
+		testutil.Equals(t, 0.0, promtest.ToFloat64(grouper.compactionFailures.WithLabelValues(metas[7].Thanos.GroupKey())))
+		testutil.Equals(t, 0.0, promtest.ToFloat64(grouper.compactionFailures.WithLabelValues(metas[4].Thanos.GroupKey())))
+		testutil.Equals(t, 0.0, promtest.ToFloat64(grouper.compactionFailures.WithLabelValues(metas[5].Thanos.GroupKey())))
 
 		_, err = os.Stat(dir)
 		testutil.Assert(t, os.IsNotExist(err), "dir %s should be remove after compaction.", dir)
@@ -374,7 +374,7 @@ func testGroupCompactE2e(t *testing.T, mergeFunc storage.VerticalChunkSeriesMerg
 				return err
 			}
 
-			others[DefaultGroupKey(meta.Thanos)] = meta
+			others[meta.Thanos.GroupKey()] = meta
 			return nil
 		}))
 
@@ -385,7 +385,7 @@ func testGroupCompactE2e(t *testing.T, mergeFunc storage.VerticalChunkSeriesMerg
 		// We expect two compacted blocks only outside of what we expected in `nonCompactedExpected`.
 		testutil.Equals(t, 2, len(others))
 		{
-			meta, ok := others[defaultGroupKey(124, extLabels)]
+			meta, ok := others[groupKey1]
 			testutil.Assert(t, ok, "meta not found")
 
 			testutil.Equals(t, int64(500), meta.MinTime)
@@ -401,7 +401,7 @@ func testGroupCompactE2e(t *testing.T, mergeFunc storage.VerticalChunkSeriesMerg
 			testutil.Assert(t, len(meta.Thanos.SegmentFiles) > 0, "compacted blocks have segment files set")
 		}
 		{
-			meta, ok := others[defaultGroupKey(124, extLabels2)]
+			meta, ok := others[groupKey2]
 			testutil.Assert(t, ok, "meta not found")
 
 			testutil.Equals(t, int64(0), meta.MinTime)
@@ -428,9 +428,7 @@ type blockgenSpec struct {
 }
 
 func createAndUpload(t testing.TB, bkt objstore.Bucket, blocks []blockgenSpec, blocksWithOutOfOrderChunks []blockgenSpec) (metas []*metadata.Meta) {
-	prepareDir, err := ioutil.TempDir("", "test-compact-prepare")
-	testutil.Ok(t, err)
-	defer func() { testutil.Ok(t, os.RemoveAll(prepareDir)) }()
+	prepareDir := t.TempDir()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
@@ -509,14 +507,14 @@ func TestGarbageCollectDoesntCreateEmptyBlocksWithDeletionMarksOnly(t *testing.T
 		garbageCollectedBlocks := promauto.With(nil).NewCounter(prometheus.CounterOpts{})
 		ignoreDeletionMarkFilter := block.NewIgnoreDeletionMarkFilter(nil, objstore.WithNoopInstr(bkt), 48*time.Hour, fetcherConcurrency)
 
-		duplicateBlocksFilter := block.NewDeduplicateFilter()
+		duplicateBlocksFilter := block.NewDeduplicateFilter(fetcherConcurrency)
 		metaFetcher, err := block.NewMetaFetcher(nil, 32, objstore.WithNoopInstr(bkt), "", nil, []block.MetadataFilter{
 			ignoreDeletionMarkFilter,
 			duplicateBlocksFilter,
-		}, nil)
+		})
 		testutil.Ok(t, err)
 
-		sy, err := NewMetaSyncer(nil, nil, bkt, metaFetcher, duplicateBlocksFilter, ignoreDeletionMarkFilter, blocksMarkedForDeletion, garbageCollectedBlocks, 1)
+		sy, err := NewMetaSyncer(nil, nil, bkt, metaFetcher, duplicateBlocksFilter, ignoreDeletionMarkFilter, blocksMarkedForDeletion, garbageCollectedBlocks)
 		testutil.Ok(t, err)
 
 		// Do one initial synchronization with the bucket.

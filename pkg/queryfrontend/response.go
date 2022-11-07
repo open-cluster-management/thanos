@@ -6,10 +6,10 @@ package queryfrontend
 import (
 	"unsafe"
 
-	"github.com/cortexproject/cortex/pkg/querier/queryrange"
+	"github.com/thanos-io/thanos/internal/cortex/querier/queryrange"
 )
 
-// ThanosResponseExtractor helps extracting specific info from Query Response.
+// ThanosResponseExtractor helps to extract specific info from Query Response.
 type ThanosResponseExtractor struct{}
 
 // Extract extracts response for specific a range from a response.
@@ -20,6 +20,16 @@ func (ThanosResponseExtractor) Extract(_, _ int64, resp queryrange.Response) que
 
 // ResponseWithoutHeaders returns the response without HTTP headers.
 func (ThanosResponseExtractor) ResponseWithoutHeaders(resp queryrange.Response) queryrange.Response {
+	switch tr := resp.(type) {
+	case *ThanosLabelsResponse:
+		return &ThanosLabelsResponse{Status: queryrange.StatusSuccess, Data: tr.Data}
+	case *ThanosSeriesResponse:
+		return &ThanosSeriesResponse{Status: queryrange.StatusSuccess, Data: tr.Data}
+	}
+	return resp
+}
+
+func (ThanosResponseExtractor) ResponseWithoutStats(resp queryrange.Response) queryrange.Response {
 	switch tr := resp.(type) {
 	case *ThanosLabelsResponse:
 		return &ThanosLabelsResponse{Status: queryrange.StatusSuccess, Data: tr.Data}
@@ -43,4 +53,14 @@ func (m *ThanosLabelsResponse) GetHeaders() []*queryrange.PrometheusResponseHead
 // GetHeaders returns the HTTP headers in the response.
 func (m *ThanosSeriesResponse) GetHeaders() []*queryrange.PrometheusResponseHeader {
 	return headersToQueryRangeHeaders(m.Headers)
+}
+
+// GetStats returns response stats. Unimplemented for ThanosLabelsResponse.
+func (m *ThanosLabelsResponse) GetStats() *queryrange.PrometheusResponseStats {
+	return nil
+}
+
+// GetStats returns response stats. Unimplemented for ThanosSeriesResponse.
+func (m *ThanosSeriesResponse) GetStats() *queryrange.PrometheusResponseStats {
+	return nil
 }

@@ -3,33 +3,31 @@
   "version": "0.1.0",
   "private": true,
   "dependencies": {
-    "@codemirror/autocomplete": "^0.19.5",
-    "@codemirror/closebrackets": "^0.19.0",
-    "@codemirror/commands": "^0.19.5",
-    "@codemirror/comment": "^0.19.0",
-    "@codemirror/highlight": "^0.19.6",
-    "@codemirror/history": "^0.19.0",
-    "@codemirror/language": "^0.19.3",
-    "@codemirror/lint": "^0.19.3",
-    "@codemirror/matchbrackets": "^0.19.3",
-    "@codemirror/search": "^0.19.2",
-    "@codemirror/state": "^0.19.5",
-    "@codemirror/view": "^0.19.15",
+    "@codemirror/autocomplete": "^6.0.4",
+    "@codemirror/commands": "^6.0.1",
+    "@codemirror/language": "^6.2.0",
+    "@codemirror/lint": "^6.0.0",
+    "@codemirror/search": "^6.0.0",
+    "@codemirror/state": "^6.1.0",
+    "@codemirror/view": "^6.0.3",
     "@forevolve/bootstrap-dark": "^1.0.0",
     "@fortawesome/fontawesome-svg-core": "^1.2.34",
     "@fortawesome/free-solid-svg-icons": "^5.15.2",
     "@fortawesome/react-fontawesome": "^0.1.14",
-    "@nexucis/fuzzy": "^0.2.2",
+    "@lezer/common": "^1.0.0",
+    "@lezer/highlight": "^1.0.0",
+    "@nexucis/fuzzy": "^0.3.0",
+    "@nexucis/kvsearch": "^0.5.0",
+    "@prometheus-io/codemirror-promql": "^0.37.0-rc.1",
     "@reach/router": "^1.3.4",
     "bootstrap": "^4.6.0",
-    "codemirror-promql": "^0.18.0",
     "css.escape": "^1.5.1",
     "downshift": "^6.1.0",
     "i": "^0.3.7",
     "jquery": "^3.5.1",
     "jquery.flot.tooltip": "^0.9.0",
     "jsdom": "^16.4.0",
-    "moment": "^2.29.1",
+    "moment": "^2.29.2",
     "moment-timezone": "^0.5.33",
     "popper.js": "^1.16.1",
     "query-string": "^6.14.0",
@@ -37,6 +35,7 @@
     "react": "^16.14.0",
     "react-copy-to-clipboard": "^5.0.3",
     "react-dom": "^16.14.0",
+    "react-infinite-scroll-component": "^6.1.0",
     "react-resize-detector": "^4.2.1",
     "react-select": "^4.1.0",
     "react-test-renderer": "^16.14.0",
@@ -88,15 +87,15 @@
     "enzyme": "^3.11.0",
     "enzyme-adapter-react-16": "^1.15.6",
     "enzyme-to-json": "^3.4.3",
-    "eslint-config-prettier": "^8.3.0",
-    "eslint-config-react-app": "^6.0.0",
+    "eslint-config-prettier": "^8.5.0",
+    "eslint-config-react-app": "^7.0.0",
     "eslint-plugin-prettier": "^4.0.0",
     "jest-fetch-mock": "^3.0.3",
     "mutationobserver-shim": "^0.3.7",
     "prettier": "^2.3.2",
-    "react-scripts": "^4.0.3",
+    "react-scripts": "^5.0.0",
     "sinon": "^9.2.4",
-    "typescript": "^4.4.3"
+    "typescript": "^4.6.2"
   },
   "proxy": "http://localhost:10902",
   "jest": {
@@ -104,8 +103,12 @@
       "enzyme-to-json/serializer"
     ],
     "transformIgnorePatterns": [
-      "/node_modules/(?!codemirror-promql).+(js|jsx)$"
-    ]
+      "<rootDir>/node_modules/(?!@prometheus-io/codemirror-promql)/",
+      "<rootDir>/node_modules/(?!@prometheus-io/lezer-promql)/"
+    ],
+    "moduleNameMapper": {
+      "lezer-promql": "<rootDir>/node_modules/@prometheus-io/lezer-promql/dist/index.cjs"
+    }
   },
   "optionalDependencies": {
     "fsevents": "^2.3.2"

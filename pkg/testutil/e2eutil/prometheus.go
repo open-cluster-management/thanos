@@ -8,7 +8,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"math"
 	"math/rand"
 	"net/http"
@@ -38,9 +37,9 @@ import (
 )
 
 const (
-	defaultPrometheusVersion   = "v1.8.2-0.20200724121523-657ba532e42f"
+	defaultPrometheusVersion   = "v0.37.0"
 	defaultAlertmanagerVersion = "v0.20.0"
-	defaultMinioVersion        = "RELEASE.2018-10-06T00-15-16Z"
+	defaultMinioVersion        = "RELEASE.2022-07-30T05-21-40Z"
 
 	// Space delimited list of versions.
 	promPathsEnvVar       = "THANOS_TEST_PROMETHEUS_PATHS"
@@ -88,7 +87,7 @@ type Prometheus struct {
 }
 
 func NewTSDB() (*tsdb.DB, error) {
-	dir, err := ioutil.TempDir("", "prometheus-test")
+	dir, err := os.MkdirTemp("", "prometheus-test")
 	if err != nil {
 		return nil, err
 	}
@@ -333,7 +332,7 @@ func CreateEmptyBlock(dir string, mint, maxt int64, extLset labels.Labels, resol
 		return ulid.ULID{}, err
 	}
 
-	if err := ioutil.WriteFile(path.Join(dir, uid.String(), "meta.json"), b, os.ModePerm); err != nil {
+	if err := os.WriteFile(path.Join(dir, uid.String(), "meta.json"), b, os.ModePerm); err != nil {
 		return ulid.ULID{}, errors.Wrap(err, "saving meta.json")
 	}
 
@@ -430,7 +429,7 @@ func createBlock(
 	headOpts := tsdb.DefaultHeadOptions()
 	headOpts.ChunkDirRoot = filepath.Join(dir, "chunks")
 	headOpts.ChunkRange = 10000000000
-	h, err := tsdb.NewHead(nil, nil, nil, headOpts, nil)
+	h, err := tsdb.NewHead(nil, nil, nil, nil, headOpts, nil)
 	if err != nil {
 		return id, errors.Wrap(err, "create head block")
 	}
