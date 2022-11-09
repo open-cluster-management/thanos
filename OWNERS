@@ -4,12 +4,9 @@ approvers:
 - dislbenn
 - marcolan018
 - subbarao-meduri
-<<<<<<< HEAD
 - dislbenn
 - ngraham20
 
-=======
 options: {}
->>>>>>> release-2.7
 reviewers:
 - morvencao
