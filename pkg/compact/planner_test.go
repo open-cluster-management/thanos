@@ -20,9 +20,9 @@ import (
 	"github.com/prometheus/prometheus/tsdb"
 	"github.com/thanos-io/objstore"
 
-	"github.com/efficientgo/core/testutil"
 	"github.com/thanos-io/thanos/pkg/block"
 	"github.com/thanos-io/thanos/pkg/block/metadata"
+	"github.com/thanos-io/thanos/pkg/testutil"
 )
 
 type tsdbPlannerAdapter struct {
@@ -800,7 +800,7 @@ func TestLargeTotalIndexSizeFilter_Plan(t *testing.T) {
 			t.Run("from meta", func(t *testing.T) {
 				obj := bkt.Objects()
 				for o := range obj {
-					testutil.Ok(t, bkt.Delete(context.Background(), o))
+					delete(obj, o)
 				}
 
 				metasByMinTime := make([]*metadata.Meta, len(c.metas))
@@ -828,7 +828,7 @@ func TestLargeTotalIndexSizeFilter_Plan(t *testing.T) {
 			t.Run("from bkt", func(t *testing.T) {
 				obj := bkt.Objects()
 				for o := range obj {
-					testutil.Ok(t, bkt.Delete(context.Background(), o))
+					delete(obj, o)
 				}
 
 				metasByMinTime := make([]*metadata.Meta, len(c.metas))

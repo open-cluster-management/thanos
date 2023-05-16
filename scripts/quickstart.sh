@@ -260,13 +260,14 @@ QUERIER_JAEGER_CONFIG=$(
 
 REMOTE_WRITE_FLAGS=""
 if [ -n "${STATELESS_RULER_ENABLED}" ]; then
-  cat >data/rule-remote-write.yaml <<-EOF
+  cat >/data/rule-remote-write.yaml <<-EOF
+  name: "thanos-receivers"
   remote_write:
-  - url: "http://localhost:10908/api/v1/receive"
+    url: "http://127.0.0.1:10908/api/v1/receive"
     name: "receive-0"
 EOF
 
-  REMOTE_WRITE_FLAGS="--remote-write.config-file=data/rule-remote-write.yaml"
+  REMOTE_WRITE_FLAGS="--remote-write.config-file data/rule-remote-write.yaml"
 fi
 
 # Start Thanos Ruler.

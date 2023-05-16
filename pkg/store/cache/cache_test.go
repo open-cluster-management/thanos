@@ -14,12 +14,11 @@ import (
 	"github.com/prometheus/prometheus/model/labels"
 	"golang.org/x/crypto/blake2b"
 
-	"github.com/efficientgo/core/testutil"
-	"github.com/thanos-io/thanos/pkg/testutil/custom"
+	"github.com/thanos-io/thanos/pkg/testutil"
 )
 
 func TestMain(m *testing.M) {
-	custom.TolerantVerifyLeakMain(m)
+	testutil.TolerantVerifyLeakMain(m)
 }
 
 func TestCacheKey_string(t *testing.T) {

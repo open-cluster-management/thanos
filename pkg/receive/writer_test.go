@@ -14,16 +14,15 @@ import (
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/prometheus/model/exemplar"
-	"github.com/prometheus/prometheus/model/histogram"
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/tsdb"
 
-	"github.com/efficientgo/core/testutil"
 	"github.com/thanos-io/thanos/pkg/block/metadata"
 	"github.com/thanos-io/thanos/pkg/runutil"
 	"github.com/thanos-io/thanos/pkg/store/labelpb"
 	"github.com/thanos-io/thanos/pkg/store/storepb/prompb"
+	"github.com/thanos-io/thanos/pkg/testutil"
 )
 
 func TestWriter(t *testing.T) {
@@ -205,62 +204,6 @@ func TestWriter(t *testing.T) {
 			expectedErr:  errors.Wrapf(storage.ErrExemplarLabelLength, "add 1 exemplars"),
 			maxExemplars: 2,
 		},
-		"should succeed on histogram with valid labels": {
-			reqs: []*prompb.WriteRequest{
-				{
-					Timeseries: []prompb.TimeSeries{
-						{
-							Labels: append(lbls, labelpb.ZLabel{Name: "a", Value: "1"}, labelpb.ZLabel{Name: "b", Value: "2"}),
-							Histograms: []prompb.Histogram{
-								histogramToHistogramProto(9, testHistogram()),
-							},
-						},
-					},
-				},
-			},
-			expectedErr: nil,
-			expectedIngested: []prompb.TimeSeries{
-				{
-					Labels: append(lbls, labelpb.ZLabel{Name: "a", Value: "1"}, labelpb.ZLabel{Name: "b", Value: "2"}),
-					Histograms: []prompb.Histogram{
-						histogramToHistogramProto(10, testHistogram()),
-					},
-				},
-			},
-		},
-		"should error out on valid histograms with out of order histogram": {
-			reqs: []*prompb.WriteRequest{
-				{
-					Timeseries: []prompb.TimeSeries{
-						{
-							Labels: append(lbls, labelpb.ZLabel{Name: "a", Value: "1"}, labelpb.ZLabel{Name: "b", Value: "2"}),
-							Histograms: []prompb.Histogram{
-								histogramToHistogramProto(10, testHistogram()),
-							},
-						},
-					},
-				},
-				{
-					Timeseries: []prompb.TimeSeries{
-						{
-							Labels: append(lbls, labelpb.ZLabel{Name: "a", Value: "1"}, labelpb.ZLabel{Name: "b", Value: "2"}),
-							Histograms: []prompb.Histogram{
-								histogramToHistogramProto(9, testHistogram()),
-							},
-						},
-					},
-				},
-			},
-			expectedErr: errors.Wrapf(storage.ErrOutOfOrderSample, "add 1 samples"),
-			expectedIngested: []prompb.TimeSeries{
-				{
-					Labels: append(lbls, labelpb.ZLabel{Name: "a", Value: "1"}, labelpb.ZLabel{Name: "b", Value: "2"}),
-					Histograms: []prompb.Histogram{
-						histogramToHistogramProto(10, testHistogram()),
-					},
-				},
-			},
-		},
 	}
 
 	for testName, testData := range tests {
@@ -269,13 +212,12 @@ func TestWriter(t *testing.T) {
 			logger := log.NewNopLogger()
 
 			m := NewMultiTSDB(dir, logger, prometheus.NewRegistry(), &tsdb.Options{
-				MinBlockDuration:       (2 * time.Hour).Milliseconds(),
-				MaxBlockDuration:       (2 * time.Hour).Milliseconds(),
-				RetentionDuration:      (6 * time.Hour).Milliseconds(),
-				NoLockfile:             true,
-				MaxExemplars:           testData.maxExemplars,
-				EnableExemplarStorage:  true,
-				EnableNativeHistograms: true,
+				MinBlockDuration:      (2 * time.Hour).Milliseconds(),
+				MaxBlockDuration:      (2 * time.Hour).Milliseconds(),
+				RetentionDuration:     (6 * time.Hour).Milliseconds(),
+				NoLockfile:            true,
+				MaxExemplars:          testData.maxExemplars,
+				EnableExemplarStorage: true,
 			},
 				labels.FromStrings("replica", "01"),
 				"tenant_id",
@@ -299,7 +241,7 @@ func TestWriter(t *testing.T) {
 				return err
 			}))
 
-			w := NewWriter(logger, m, false)
+			w := NewWriter(logger, m)
 
 			for idx, req := range testData.reqs {
 				err = w.Write(context.Background(), DefaultTenant, req)
@@ -320,54 +262,32 @@ func TestWriter(t *testing.T) {
 			gr := a.(storage.GetRef)
 
 			for _, ts := range testData.expectedIngested {
-				l := labelpb.ZLabelsToPromLabels(ts.Labels)
-				ref, _ := gr.GetRef(l, l.Hash())
+				ref, _ := gr.GetRef(labelpb.ZLabelsToPromLabels(ts.Labels))
 				testutil.Assert(t, ref != 0, fmt.Sprintf("appender should have reference to series %v", ts))
 			}
 		})
 	}
 }
 
-func BenchmarkWriterTimeSeriesWithSingleLabel_10(b *testing.B)   { benchmarkWriter(b, 1, 10, false) }
-func BenchmarkWriterTimeSeriesWithSingleLabel_100(b *testing.B)  { benchmarkWriter(b, 1, 100, false) }
-func BenchmarkWriterTimeSeriesWithSingleLabel_1000(b *testing.B) { benchmarkWriter(b, 1, 1000, false) }
+func BenchmarkWriterTimeSeriesWithSingleLabel_10(b *testing.B)   { benchmarkWriter(b, 1, 10) }
+func BenchmarkWriterTimeSeriesWithSingleLabel_100(b *testing.B)  { benchmarkWriter(b, 1, 100) }
+func BenchmarkWriterTimeSeriesWithSingleLabel_1000(b *testing.B) { benchmarkWriter(b, 1, 1000) }
 
-func BenchmarkWriterTimeSeriesWith10Labels_10(b *testing.B)   { benchmarkWriter(b, 10, 10, false) }
-func BenchmarkWriterTimeSeriesWith10Labels_100(b *testing.B)  { benchmarkWriter(b, 10, 100, false) }
-func BenchmarkWriterTimeSeriesWith10Labels_1000(b *testing.B) { benchmarkWriter(b, 10, 1000, false) }
+func BenchmarkWriterTimeSeriesWith10Labels_10(b *testing.B)   { benchmarkWriter(b, 10, 10) }
+func BenchmarkWriterTimeSeriesWith10Labels_100(b *testing.B)  { benchmarkWriter(b, 10, 100) }
+func BenchmarkWriterTimeSeriesWith10Labels_1000(b *testing.B) { benchmarkWriter(b, 10, 1000) }
 
-func BenchmarkWriterTimeSeriesWithHistogramsWithSingleLabel_10(b *testing.B) {
-	benchmarkWriter(b, 1, 10, true)
-}
-func BenchmarkWriterTimeSeriesWithHistogramsWithSingleLabel_100(b *testing.B) {
-	benchmarkWriter(b, 1, 100, true)
-}
-func BenchmarkWriterTimeSeriesWithHistogramsWithSingleLabel_1000(b *testing.B) {
-	benchmarkWriter(b, 1, 1000, true)
-}
-
-func BenchmarkWriterTimeSeriesWithHistogramsWith10Labels_10(b *testing.B) {
-	benchmarkWriter(b, 10, 10, true)
-}
-func BenchmarkWriterTimeSeriesWithHistogramsWith10Labels_100(b *testing.B) {
-	benchmarkWriter(b, 10, 100, true)
-}
-func BenchmarkWriterTimeSeriesWithHistogramsWith10Labels_1000(b *testing.B) {
-	benchmarkWriter(b, 10, 1000, true)
-}
-
-func benchmarkWriter(b *testing.B, labelsNum int, seriesNum int, generateHistograms bool) {
+func benchmarkWriter(b *testing.B, labelsNum int, seriesNum int) {
 	dir := b.TempDir()
 	logger := log.NewNopLogger()
 
 	m := NewMultiTSDB(dir, logger, prometheus.NewRegistry(), &tsdb.Options{
-		MinBlockDuration:       (2 * time.Hour).Milliseconds(),
-		MaxBlockDuration:       (2 * time.Hour).Milliseconds(),
-		RetentionDuration:      (6 * time.Hour).Milliseconds(),
-		NoLockfile:             true,
-		MaxExemplars:           0,
-		EnableExemplarStorage:  true,
-		EnableNativeHistograms: generateHistograms,
+		MinBlockDuration:      (2 * time.Hour).Milliseconds(),
+		MaxBlockDuration:      (2 * time.Hour).Milliseconds(),
+		RetentionDuration:     (6 * time.Hour).Milliseconds(),
+		NoLockfile:            true,
+		MaxExemplars:          0,
+		EnableExemplarStorage: true,
 	},
 		labels.FromStrings("replica", "01"),
 		"tenant_id",
@@ -383,6 +303,8 @@ func benchmarkWriter(b *testing.B, labelsNum int, seriesNum int, generateHistogr
 	app, err := m.TenantAppendable("foo")
 	testutil.Ok(b, err)
 
+	w := NewWriter(logger, m)
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -391,34 +313,18 @@ func benchmarkWriter(b *testing.B, labelsNum int, seriesNum int, generateHistogr
 		return err
 	}))
 
-	timeSeries := generateLabelsAndSeries(labelsNum, seriesNum, generateHistograms)
+	timeSeries := generateLabelsAndSeries(labelsNum, seriesNum)
 
 	wreq := &prompb.WriteRequest{
 		Timeseries: timeSeries,
 	}
 
-	b.Run("without interning", func(b *testing.B) {
-		w := NewWriter(logger, m, false)
+	b.ReportAllocs()
+	b.ResetTimer()
 
-		b.ReportAllocs()
-		b.ResetTimer()
-
-		for i := 0; i < b.N; i++ {
-			testutil.Ok(b, w.Write(ctx, "foo", wreq))
-		}
-	})
-
-	b.Run("with interning", func(b *testing.B) {
-		w := NewWriter(logger, m, true)
-
-		b.ReportAllocs()
-		b.ResetTimer()
-
-		for i := 0; i < b.N; i++ {
-			testutil.Ok(b, w.Write(ctx, "foo", wreq))
-		}
-	})
-
+	for i := 0; i < b.N; i++ {
+		testutil.Ok(b, w.Write(ctx, "foo", wreq))
+	}
 }
 
 // generateLabelsAndSeries generates time series for benchmark with specified number of labels.
@@ -426,7 +332,7 @@ func benchmarkWriter(b *testing.B, labelsNum int, seriesNum int, generateHistogr
 // duplicates without error (see comment https://github.com/prometheus/prometheus/blob/release-2.37/tsdb/head_append.go#L316).
 // This also means the sample won't be appended, which means the overhead of appending additional samples to head is not
 // reflected in the benchmark, but should still capture the performance of receive writer.
-func generateLabelsAndSeries(numLabels int, numSeries int, generateHistograms bool) []prompb.TimeSeries {
+func generateLabelsAndSeries(numLabels int, numSeries int) []prompb.TimeSeries {
 	// Generate some labels first.
 	l := make([]labelpb.ZLabel, 0, numLabels)
 	l = append(l, labelpb.ZLabel{Name: "__name__", Value: "test"})
@@ -434,58 +340,10 @@ func generateLabelsAndSeries(numLabels int, numSeries int, generateHistograms bo
 		l = append(l, labelpb.ZLabel{Name: fmt.Sprintf("label_%s", string(rune('a'+i))), Value: fmt.Sprintf("%d", i)})
 	}
 
-	ts := make([]prompb.TimeSeries, numSeries)
+	ts := make([]prompb.TimeSeries, 0, numSeries)
 	for j := 0; j < numSeries; j++ {
-		ts[j] = prompb.TimeSeries{
-			Labels: l,
-		}
-
-		if generateHistograms {
-			ts[j].Histograms = []prompb.Histogram{histogramToHistogramProto(10, testHistogram())}
-			continue
-		}
-
-		ts[j].Samples = []prompb.Sample{{Value: 1, Timestamp: 10}}
+		ts = append(ts, prompb.TimeSeries{Labels: l, Samples: []prompb.Sample{{Value: 1, Timestamp: 10}}})
 	}
 
 	return ts
-}
-
-func testHistogram() *histogram.Histogram {
-	return &histogram.Histogram{
-		Count:         5,
-		ZeroCount:     2,
-		Sum:           18.4,
-		ZeroThreshold: 0.1,
-		Schema:        1,
-		PositiveSpans: []histogram.Span{
-			{Offset: 0, Length: 2},
-			{Offset: 1, Length: 2},
-		},
-		PositiveBuckets: []int64{1, 1, -1, 0}, // counts: 1, 2, 1, 1 (total 5)
-	}
-}
-
-func histogramToHistogramProto(timestamp int64, h *histogram.Histogram) prompb.Histogram {
-	return prompb.Histogram{
-		Count:          &prompb.Histogram_CountInt{CountInt: h.Count},
-		Sum:            h.Sum,
-		Schema:         h.Schema,
-		ZeroThreshold:  h.ZeroThreshold,
-		ZeroCount:      &prompb.Histogram_ZeroCountInt{ZeroCountInt: h.ZeroCount},
-		NegativeSpans:  spansToSpansProto(h.NegativeSpans),
-		NegativeDeltas: h.NegativeBuckets,
-		PositiveSpans:  spansToSpansProto(h.PositiveSpans),
-		PositiveDeltas: h.PositiveBuckets,
-		Timestamp:      timestamp,
-	}
-}
-
-func spansToSpansProto(s []histogram.Span) []*prompb.BucketSpan {
-	spans := make([]*prompb.BucketSpan, len(s))
-	for i := 0; i < len(s); i++ {
-		spans[i] = &prompb.BucketSpan{Offset: s[i].Offset, Length: s[i].Length}
-	}
-
-	return spans
 }

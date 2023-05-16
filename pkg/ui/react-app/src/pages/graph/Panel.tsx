@@ -38,7 +38,6 @@ interface PanelState {
   lastQueryParams: QueryParams | null;
   loading: boolean;
   error: string | null;
-  warnings: string[] | null;
   stats: QueryStats | null;
   exprInputValue: string;
 }
@@ -84,7 +83,6 @@ class Panel extends Component<PanelProps & PathPrefixProps, PanelState> {
       data: null,
       lastQueryParams: null,
       loading: false,
-      warnings: null,
       error: null,
       stats: null,
       exprInputValue: props.options.expr,
@@ -208,7 +206,6 @@ class Panel extends Component<PanelProps & PathPrefixProps, PanelState> {
             endTime,
             resolution,
           },
-          warnings: json.warnings,
           stats: {
             loadTime: Date.now() - queryStart,
             resolution,
@@ -287,10 +284,6 @@ class Panel extends Component<PanelProps & PathPrefixProps, PanelState> {
     this.setState({ error: null });
   };
 
-  handleToggleWarn = (): void => {
-    this.setState({ warnings: null });
-  };
-
   render(): JSX.Element {
     const { pastQueries, metricNames, options, id, stores } = this.props;
     return (
@@ -315,18 +308,6 @@ class Panel extends Component<PanelProps & PathPrefixProps, PanelState> {
           <Col>
             <UncontrolledAlert isOpen={this.state.error || false} toggle={this.handleToggleAlert} color="danger">
               {this.state.error}
-            </UncontrolledAlert>
-          </Col>
-        </Row>
-        <Row>
-          <Col>
-            <UncontrolledAlert
-              isOpen={this.state.warnings || false}
-              toggle={this.handleToggleWarn}
-              color="info"
-              style={{ whiteSpace: 'break-spaces' }}
-            >
-              {this.state.warnings}
             </UncontrolledAlert>
           </Col>
         </Row>

@@ -13,7 +13,7 @@ import (
 
 	"github.com/pkg/errors"
 
-	"github.com/efficientgo/core/testutil"
+	"github.com/thanos-io/thanos/pkg/testutil"
 )
 
 type mockHostnameResolver struct {

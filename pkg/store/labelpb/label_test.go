@@ -13,7 +13,7 @@ import (
 
 	"github.com/prometheus/prometheus/model/labels"
 
-	"github.com/efficientgo/core/testutil"
+	"github.com/thanos-io/thanos/pkg/testutil"
 )
 
 var testLsetMap = map[string]string{
@@ -351,22 +351,13 @@ func BenchmarkZLabelsMarshalUnmarshal(b *testing.B) {
 	})
 }
 
-func BenchmarkTransformWithAndWithoutCopyWithSingleLabel(b *testing.B) {
-	benchmarkTransformWithAndWithoutCopy(b, 1)
-}
-
-func BenchmarkTransformWithAndWithoutCopyWith1000Labels(b *testing.B) {
-	benchmarkTransformWithAndWithoutCopy(b, 1000)
-}
-
-func BenchmarkTransformWithAndWithoutCopyWith100000Labels(b *testing.B) {
-	benchmarkTransformWithAndWithoutCopy(b, 100000)
-}
-
 var ret labels.Labels
 
-func benchmarkTransformWithAndWithoutCopy(b *testing.B, num int) {
-	const fmtLbl = "%07daaaaaaaaaabbbbbbbbbbccccccccccdddddddddd"
+func BenchmarkTransformWithAndWithoutCopy(b *testing.B) {
+	const (
+		fmtLbl = "%07daaaaaaaaaabbbbbbbbbbccccccccccdddddddddd"
+		num    = 1000000
+	)
 
 	b.Run("ZLabelsToPromLabels", func(b *testing.B) {
 		b.ReportAllocs()
@@ -389,7 +380,7 @@ func benchmarkTransformWithAndWithoutCopy(b *testing.B, num int) {
 		b.ResetTimer()
 
 		for i := 0; i < b.N; i++ {
-			ReAllocZLabelsStrings(&lbls, true)
+			ReAllocZLabelsStrings(&lbls)
 			ret = ZLabelsToPromLabels(lbls)
 		}
 	})

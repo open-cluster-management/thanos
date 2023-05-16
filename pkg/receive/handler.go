@@ -12,7 +12,6 @@ import (
 	stdlog "log"
 	"net"
 	"net/http"
-	"path"
 	"sort"
 	"strconv"
 	"sync"
@@ -32,14 +31,14 @@ import (
 	"github.com/prometheus/prometheus/model/relabel"
 	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/tsdb"
+	"github.com/thanos-io/thanos/pkg/api"
+	statusapi "github.com/thanos-io/thanos/pkg/api/status"
+	"github.com/thanos-io/thanos/pkg/logging"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"github.com/thanos-io/thanos/pkg/api"
-	statusapi "github.com/thanos-io/thanos/pkg/api/status"
-	"github.com/thanos-io/thanos/pkg/logging"
-
+	"github.com/thanos-io/thanos/pkg/errutil"
 	extpromhttp "github.com/thanos-io/thanos/pkg/extprom/http"
 	"github.com/thanos-io/thanos/pkg/runutil"
 	"github.com/thanos-io/thanos/pkg/server/http/middleware"
@@ -79,7 +78,6 @@ var (
 	errBadReplica  = errors.New("request replica exceeds receiver replication factor")
 	errNotReady    = errors.New("target not ready")
 	errUnavailable = errors.New("target not available")
-	errInternal    = errors.New("internal error")
 )
 
 // Options for the web Handler.
@@ -352,24 +350,7 @@ type replica struct {
 // endpointReplica is a pair of a receive endpoint and a write request replica.
 type endpointReplica struct {
 	endpoint string
-	replica  uint64
-}
-
-type trackedSeries struct {
-	seriesIDs  []int
-	timeSeries []prompb.TimeSeries
-}
-
-type writeResponse struct {
-	seriesIDs []int
-	err       error
-}
-
-func newWriteResponse(seriesIDs []int, err error) writeResponse {
-	return writeResponse{
-		seriesIDs: seriesIDs,
-		err:       err,
-	}
+	replica  replica
 }
 
 func (h *Handler) handleRequest(ctx context.Context, rep uint64, tenant string, wreq *prompb.WriteRequest) error {
@@ -404,13 +385,6 @@ func (h *Handler) handleRequest(ctx context.Context, rep uint64, tenant string, 
 	return h.forward(ctx, tenant, r, wreq)
 }
 
-func (h *Handler) isTenantValid(tenant string) error {
-	if tenant != path.Base(tenant) {
-		return errors.New("Tenant name not valid")
-	}
-	return nil
-}
-
 func (h *Handler) receiveHTTP(w http.ResponseWriter, r *http.Request) {
 	var err error
 	span, ctx := tracing.StartSpan(r.Context(), "receive_http")
@@ -428,13 +402,6 @@ func (h *Handler) receiveHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-	}
-
-	err = h.isTenantValid(tenant)
-	if err != nil {
-		level.Error(h.logger).Log("msg", "tenant name not valid", "tenant", tenant)
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
 	}
 
 	tLogger := log.With(h.logger, "tenant", tenant)
@@ -546,7 +513,7 @@ func (h *Handler) receiveHTTP(w http.ResponseWriter, r *http.Request) {
 	responseStatusCode := http.StatusOK
 	if err = h.handleRequest(ctx, rep, tenant, &wreq); err != nil {
 		level.Debug(tLogger).Log("msg", "failed to handle request", "err", err)
-		switch errors.Cause(err) {
+		switch determineWriteErrorCause(err, 1) {
 		case errNotReady:
 			responseStatusCode = http.StatusServiceUnavailable
 		case errUnavailable:
@@ -585,39 +552,30 @@ func (h *Handler) forward(ctx context.Context, tenant string, r replica, wreq *p
 		return errors.New("hashring is not ready")
 	}
 
-	var replicas []uint64
-	if r.replicated {
-		replicas = []uint64{r.n}
-	} else {
-		for rn := uint64(0); rn < h.options.ReplicationFactor; rn++ {
-			replicas = append(replicas, rn)
+	// Batch all of the time series in the write request
+	// into several smaller write requests that are
+	// grouped by target endpoint. This ensures that
+	// for any incoming write request to a node,
+	// at most one outgoing write request will be made
+	// to every other node in the hashring, rather than
+	// one request per time series.
+	wreqs := make(map[endpointReplica]*prompb.WriteRequest)
+	for i := range wreq.Timeseries {
+		endpoint, err := h.hashring.GetN(tenant, &wreq.Timeseries[i], r.n)
+		if err != nil {
+			h.mtx.RUnlock()
+			return err
 		}
-	}
-
-	wreqs := make(map[endpointReplica]trackedSeries)
-	for tsID, ts := range wreq.Timeseries {
-		for _, rn := range replicas {
-			endpoint, err := h.hashring.GetN(tenant, &ts, rn)
-			if err != nil {
-				h.mtx.RUnlock()
-				return err
-			}
-			key := endpointReplica{endpoint: endpoint, replica: rn}
-			writeTarget, ok := wreqs[key]
-			if !ok {
-				writeTarget = trackedSeries{
-					seriesIDs:  make([]int, 0),
-					timeSeries: make([]prompb.TimeSeries, 0),
-				}
-			}
-			writeTarget.timeSeries = append(wreqs[key].timeSeries, ts)
-			writeTarget.seriesIDs = append(wreqs[key].seriesIDs, tsID)
-			wreqs[key] = writeTarget
+		key := endpointReplica{endpoint: endpoint, replica: r}
+		if _, ok := wreqs[key]; !ok {
+			wreqs[key] = &prompb.WriteRequest{}
 		}
+		wr := wreqs[key]
+		wr.Timeseries = append(wr.Timeseries, wreq.Timeseries[i])
 	}
 	h.mtx.RUnlock()
 
-	return h.fanoutForward(ctx, tenant, wreqs, len(wreq.Timeseries), r.replicated)
+	return h.fanoutForward(ctx, tenant, wreqs, len(wreqs))
 }
 
 // writeQuorum returns minimum number of replicas that has to confirm write success before claiming replication success.
@@ -625,26 +583,16 @@ func (h *Handler) writeQuorum() int {
 	return int((h.options.ReplicationFactor / 2) + 1)
 }
 
-func quorumReached(successes []int, successThreshold int) bool {
-	for _, success := range successes {
-		if success < successThreshold {
-			return false
-		}
-	}
-
-	return true
-}
-
 // fanoutForward fans out concurrently given set of write requests. It returns status immediately when quorum of
 // requests succeeds or fails or if context is canceled.
-func (h *Handler) fanoutForward(pctx context.Context, tenant string, wreqs map[endpointReplica]trackedSeries, numSeries int, seriesReplicated bool) error {
-	var errs writeErrors
+func (h *Handler) fanoutForward(pctx context.Context, tenant string, wreqs map[endpointReplica]*prompb.WriteRequest, successThreshold int) error {
+	var errs errutil.MultiError
 
 	fctx, cancel := context.WithTimeout(tracing.CopyTraceContext(context.Background(), pctx), h.options.ForwardTimeout)
 	defer func() {
-		if errs.ErrOrNil() != nil {
+		if errs.Err() != nil {
 			// NOTICE: The cancel function is not used on all paths intentionally,
-			// if there is no error when quorum is reached,
+			// if there is no error when quorum successThreshold is reached,
 			// let forward requests to optimistically run until timeout.
 			cancel()
 		}
@@ -659,11 +607,38 @@ func (h *Handler) fanoutForward(pctx context.Context, tenant string, wreqs map[e
 		tLogger = log.With(h.logger, logTags)
 	}
 
-	responses := make(chan writeResponse)
+	ec := make(chan error)
 
 	var wg sync.WaitGroup
-	for writeTarget := range wreqs {
+	for er := range wreqs {
+		er := er
+		r := er.replica
+		endpoint := er.endpoint
+
 		wg.Add(1)
+		// If the request is not yet replicated, let's replicate it.
+		// If the replication factor isn't greater than 1, let's
+		// just forward the requests.
+		if !r.replicated && h.options.ReplicationFactor > 1 {
+			go func(endpoint string) {
+				defer wg.Done()
+
+				var err error
+				tracing.DoInSpan(fctx, "receive_replicate", func(ctx context.Context) {
+					err = h.replicate(ctx, tenant, wreqs[er])
+				})
+				if err != nil {
+					h.replications.WithLabelValues(labelError).Inc()
+					ec <- errors.Wrapf(err, "replicate write request for endpoint %v", endpoint)
+					return
+				}
+
+				h.replications.WithLabelValues(labelSuccess).Inc()
+				ec <- nil
+			}(endpoint)
+
+			continue
+		}
 
 		// If the endpoint for the write request is the
 		// local node, then don't make a request but store locally.
@@ -671,29 +646,29 @@ func (h *Handler) fanoutForward(pctx context.Context, tenant string, wreqs map[e
 		// function as replication to other nodes, we can treat
 		// a failure to write locally as just another error that
 		// can be ignored if the replication factor is met.
-		if writeTarget.endpoint == h.options.Endpoint {
-			go func(writeTarget endpointReplica) {
+		if endpoint == h.options.Endpoint {
+			go func(endpoint string) {
 				defer wg.Done()
 
 				var err error
 				tracing.DoInSpan(fctx, "receive_tsdb_write", func(_ context.Context) {
-					err = h.writer.Write(fctx, tenant, &prompb.WriteRequest{
-						Timeseries: wreqs[writeTarget].timeSeries,
-					})
+					err = h.writer.Write(fctx, tenant, wreqs[er])
 				})
 				if err != nil {
+					// When a MultiError is added to another MultiError, the error slices are concatenated, not nested.
+					// To avoid breaking the counting logic, we need to flatten the error.
 					level.Debug(tLogger).Log("msg", "local tsdb write failed", "err", err.Error())
-					responses <- newWriteResponse(wreqs[writeTarget].seriesIDs, errors.Wrapf(err, "store locally for endpoint %v", writeTarget.endpoint))
+					ec <- errors.Wrapf(determineWriteErrorCause(err, 1), "store locally for endpoint %v", endpoint)
 					return
 				}
-				responses <- newWriteResponse(wreqs[writeTarget].seriesIDs, nil)
-			}(writeTarget)
+				ec <- nil
+			}(endpoint)
 
 			continue
 		}
 
 		// Make a request to the specified endpoint.
-		go func(writeTarget endpointReplica) {
+		go func(endpoint string) {
 			defer wg.Done()
 
 			var (
@@ -704,29 +679,23 @@ func (h *Handler) fanoutForward(pctx context.Context, tenant string, wreqs map[e
 				// This is an actual remote forward request so report metric here.
 				if err != nil {
 					h.forwardRequests.WithLabelValues(labelError).Inc()
-					if !seriesReplicated {
-						h.replications.WithLabelValues(labelError).Inc()
-					}
 					return
 				}
 				h.forwardRequests.WithLabelValues(labelSuccess).Inc()
-				if !seriesReplicated {
-					h.replications.WithLabelValues(labelSuccess).Inc()
-				}
 			}()
 
-			cl, err = h.peers.get(fctx, writeTarget.endpoint)
+			cl, err = h.peers.get(fctx, endpoint)
 			if err != nil {
-				responses <- newWriteResponse(wreqs[writeTarget].seriesIDs, errors.Wrapf(err, "get peer connection for endpoint %v", writeTarget.endpoint))
+				ec <- errors.Wrapf(err, "get peer connection for endpoint %v", endpoint)
 				return
 			}
 
 			h.mtx.RLock()
-			b, ok := h.peerStates[writeTarget.endpoint]
+			b, ok := h.peerStates[endpoint]
 			if ok {
 				if time.Now().Before(b.nextAllowed) {
 					h.mtx.RUnlock()
-					responses <- newWriteResponse(wreqs[writeTarget].seriesIDs, errors.Wrapf(errUnavailable, "backing off forward request for endpoint %v", writeTarget.endpoint))
+					ec <- errors.Wrapf(errUnavailable, "backing off forward request for endpoint %v", endpoint)
 					return
 				}
 			}
@@ -736,10 +705,10 @@ func (h *Handler) fanoutForward(pctx context.Context, tenant string, wreqs map[e
 			tracing.DoInSpan(fctx, "receive_forward", func(ctx context.Context) {
 				// Actually make the request against the endpoint we determined should handle these time series.
 				_, err = cl.RemoteWrite(ctx, &storepb.WriteRequest{
-					Timeseries: wreqs[writeTarget].timeSeries,
+					Timeseries: wreqs[er].Timeseries,
 					Tenant:     tenant,
 					// Increment replica since on-the-wire format is 1-indexed and 0 indicates un-replicated.
-					Replica: int64(writeTarget.replica + 1),
+					Replica: int64(r.n + 1),
 				})
 			})
 			if err != nil {
@@ -747,78 +716,113 @@ func (h *Handler) fanoutForward(pctx context.Context, tenant string, wreqs map[e
 				if st, ok := status.FromError(err); ok {
 					if st.Code() == codes.Unavailable {
 						h.mtx.Lock()
-						if b, ok := h.peerStates[writeTarget.endpoint]; ok {
+						if b, ok := h.peerStates[endpoint]; ok {
 							b.attempt++
 							dur := h.expBackoff.ForAttempt(b.attempt)
 							b.nextAllowed = time.Now().Add(dur)
 							level.Debug(tLogger).Log("msg", "target unavailable backing off", "for", dur)
 						} else {
-							h.peerStates[writeTarget.endpoint] = &retryState{nextAllowed: time.Now().Add(h.expBackoff.ForAttempt(0))}
+							h.peerStates[endpoint] = &retryState{nextAllowed: time.Now().Add(h.expBackoff.ForAttempt(0))}
 						}
 						h.mtx.Unlock()
 					}
 				}
-				werr := errors.Wrapf(err, "forwarding request to endpoint %v", writeTarget.endpoint)
-				responses <- newWriteResponse(wreqs[writeTarget].seriesIDs, werr)
+				ec <- errors.Wrapf(err, "forwarding request to endpoint %v", endpoint)
 				return
 			}
 			h.mtx.Lock()
-			delete(h.peerStates, writeTarget.endpoint)
+			delete(h.peerStates, endpoint)
 			h.mtx.Unlock()
 
-			responses <- newWriteResponse(wreqs[writeTarget].seriesIDs, nil)
-		}(writeTarget)
+			ec <- nil
+		}(endpoint)
 	}
 
 	go func() {
 		wg.Wait()
-		close(responses)
+		close(ec)
 	}()
 
 	// At the end, make sure to exhaust the channel, letting remaining unnecessary requests finish asynchronously.
 	// This is needed if context is canceled or if we reached success of fail quorum faster.
 	defer func() {
 		go func() {
-			for wresp := range responses {
-				if wresp.err != nil {
-					level.Debug(tLogger).Log("msg", "request failed, but not needed to achieve quorum", "err", wresp.err)
+			for err := range ec {
+				if err != nil {
+					level.Debug(tLogger).Log("msg", "request failed, but not needed to achieve quorum", "err", err)
 				}
 			}
 		}()
 	}()
 
-	quorum := h.writeQuorum()
-	if seriesReplicated {
-		quorum = 1
-	}
-	successes := make([]int, numSeries)
-	seriesErrs := newReplicationErrors(quorum, numSeries)
+	var success int
 	for {
 		select {
 		case <-fctx.Done():
 			return fctx.Err()
-		case wresp, more := <-responses:
+		case err, more := <-ec:
 			if !more {
-				for _, rerr := range seriesErrs {
-					errs.Add(rerr)
-				}
-				return errs.ErrOrNil()
+				return errs.Err()
 			}
-
-			if wresp.err != nil {
-				for _, tsID := range wresp.seriesIDs {
-					seriesErrs[tsID].Add(wresp.err)
+			if err == nil {
+				success++
+				if success >= successThreshold {
+					// In case the success threshold is lower than the total
+					// number of requests, then we can finish early here. This
+					// is the case for quorum writes for example.
+					return nil
 				}
 				continue
 			}
-			for _, tsID := range wresp.seriesIDs {
-				successes[tsID]++
-			}
-			if quorumReached(successes, quorum) {
-				return nil
-			}
+			errs.Add(err)
 		}
 	}
+}
+
+// replicate replicates a write request to (replication-factor) nodes
+// selected by the tenant and time series.
+// The function only returns when all replication requests have finished
+// or the context is canceled.
+func (h *Handler) replicate(ctx context.Context, tenant string, wreq *prompb.WriteRequest) error {
+	// It is possible that hashring is ready in testReady() but unready now,
+	// so need to lock here.
+	h.mtx.RLock()
+	if h.hashring == nil {
+		h.mtx.RUnlock()
+		return errors.New("hashring is not ready")
+	}
+
+	replicatedRequests := make(map[endpointReplica]*prompb.WriteRequest)
+	for i := uint64(0); i < h.options.ReplicationFactor; i++ {
+		for _, ts := range wreq.Timeseries {
+			endpoint, err := h.hashring.GetN(tenant, &ts, i)
+			if err != nil {
+				h.mtx.RUnlock()
+				return err
+			}
+
+			er := endpointReplica{
+				endpoint: endpoint,
+				replica:  replica{n: i, replicated: true},
+			}
+			replicatedRequest, ok := replicatedRequests[er]
+			if !ok {
+				replicatedRequest = &prompb.WriteRequest{
+					Timeseries: make([]prompb.TimeSeries, 0),
+				}
+				replicatedRequests[er] = replicatedRequest
+			}
+			replicatedRequest.Timeseries = append(replicatedRequest.Timeseries, ts)
+		}
+	}
+	h.mtx.RUnlock()
+
+	quorum := h.writeQuorum()
+	// fanoutForward only returns an error if successThreshold (quorum) is not reached.
+	if err := h.fanoutForward(ctx, tenant, replicatedRequests, quorum); err != nil {
+		return errors.Wrap(determineWriteErrorCause(err, quorum), "quorum not reached")
+	}
+	return nil
 }
 
 // RemoteWrite implements the gRPC remote write handler for storepb.WriteableStore.
@@ -830,7 +834,7 @@ func (h *Handler) RemoteWrite(ctx context.Context, r *storepb.WriteRequest) (*st
 	if err != nil {
 		level.Debug(h.logger).Log("msg", "failed to handle request", "err", err)
 	}
-	switch errors.Cause(err) {
+	switch determineWriteErrorCause(err, 1) {
 	case nil:
 		return &storepb.WriteResponse{}, nil
 	case errNotReady:
@@ -853,9 +857,8 @@ func (h *Handler) relabel(wreq *prompb.WriteRequest) {
 	}
 	timeSeries := make([]prompb.TimeSeries, 0, len(wreq.Timeseries))
 	for _, ts := range wreq.Timeseries {
-		var keep bool
-		lbls, keep := relabel.Process(labelpb.ZLabelsToPromLabels(ts.Labels), h.options.RelabelConfigs...)
-		if !keep {
+		lbls := relabel.Process(labelpb.ZLabelsToPromLabels(ts.Labels), h.options.RelabelConfigs...)
+		if lbls == nil {
 			continue
 		}
 		ts.Labels = labelpb.ZLabelsFromPromLabels(lbls)
@@ -881,8 +884,7 @@ func isConflict(err error) bool {
 func isSampleConflictErr(err error) bool {
 	return err == storage.ErrDuplicateSampleForTimestamp ||
 		err == storage.ErrOutOfOrderSample ||
-		err == storage.ErrOutOfBounds ||
-		err == storage.ErrTooOldSample
+		err == storage.ErrOutOfBounds
 }
 
 // isExemplarConflictErr returns whether or not the given error represents
@@ -921,9 +923,7 @@ type retryState struct {
 	nextAllowed time.Time
 }
 
-type expectedErrors []*expectedError
-
-type expectedError struct {
+type expectedErrors []*struct {
 	err   error
 	cause func(error) bool
 	count int
@@ -933,141 +933,25 @@ func (a expectedErrors) Len() int           { return len(a) }
 func (a expectedErrors) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
 func (a expectedErrors) Less(i, j int) bool { return a[i].count < a[j].count }
 
-// errorSet is a set of errors.
-type errorSet struct {
-	reasonSet map[string]struct{}
-	errs      []error
-}
-
-// Error returns a string containing a deduplicated set of reasons.
-func (es errorSet) Error() string {
-	if len(es.reasonSet) == 0 {
-		return ""
-	}
-	reasons := make([]string, 0, len(es.reasonSet))
-	for reason := range es.reasonSet {
-		reasons = append(reasons, reason)
-	}
-	sort.Strings(reasons)
-
-	var buf bytes.Buffer
-	if len(reasons) > 1 {
-		fmt.Fprintf(&buf, "%d errors: ", len(es.reasonSet))
-	}
-
-	var more bool
-	for _, reason := range reasons {
-		if more {
-			buf.WriteString("; ")
-		}
-		buf.WriteString(reason)
-		more = true
-	}
-
-	return buf.String()
-}
-
-// Add adds an error to the errorSet.
-func (es *errorSet) Add(err error) {
+// determineWriteErrorCause extracts a sentinel error that has occurred more than the given threshold from a given fan-out error.
+// It will inspect the error's cause if the error is a MultiError,
+// It will return cause of each contained error but will not traverse any deeper.
+func determineWriteErrorCause(err error, threshold int) error {
 	if err == nil {
-		return
-	}
-
-	if len(es.errs) == 0 {
-		es.errs = []error{err}
-	} else {
-		es.errs = append(es.errs, err)
-	}
-	if es.reasonSet == nil {
-		es.reasonSet = make(map[string]struct{})
-	}
-
-	switch addedErr := err.(type) {
-	case *replicationErrors:
-		for reason := range addedErr.reasonSet {
-			es.reasonSet[reason] = struct{}{}
-		}
-	case *writeErrors:
-		for reason := range addedErr.reasonSet {
-			es.reasonSet[reason] = struct{}{}
-		}
-	default:
-		es.reasonSet[err.Error()] = struct{}{}
-	}
-}
-
-// writeErrors contains all errors that have
-// occurred during a local write of a remote-write request.
-type writeErrors struct {
-	errorSet
-}
-
-// ErrOrNil returns the writeErrors instance if any
-// errors are contained in it.
-// Otherwise, it returns nil.
-func (es *writeErrors) ErrOrNil() error {
-	if len(es.errs) == 0 {
-		return nil
-	}
-	return es
-}
-
-// Cause returns the primary cause for a write failure.
-// If multiple errors have occurred, Cause will prefer
-// recoverable over non-recoverable errors.
-func (es *writeErrors) Cause() error {
-	if len(es.errs) == 0 {
 		return nil
 	}
 
-	expErrs := expectedErrors{
-		{err: errUnavailable, cause: isUnavailable},
-		{err: errNotReady, cause: isNotReady},
-		{err: errConflict, cause: isConflict},
+	unwrappedErr := errors.Cause(err)
+	errs, ok := unwrappedErr.(errutil.NonNilMultiError)
+	if !ok {
+		errs = []error{unwrappedErr}
+	}
+	if len(errs) == 0 {
+		return nil
 	}
 
-	var (
-		unknownErr error
-		knownCause bool
-	)
-	for _, werr := range es.errs {
-		knownCause = false
-		cause := errors.Cause(werr)
-		for _, exp := range expErrs {
-			if exp.cause(cause) {
-				knownCause = true
-				exp.count++
-			}
-		}
-		if !knownCause {
-			unknownErr = cause
-		}
-	}
-
-	for _, exp := range expErrs {
-		if exp.count > 0 {
-			return exp.err
-		}
-	}
-
-	return unknownErr
-}
-
-// replicationErrors contains errors that have happened while
-// replicating a time series within a remote-write request.
-type replicationErrors struct {
-	errorSet
-	threshold int
-}
-
-// Cause extracts a sentinel error with the highest occurrence that
-// has happened more than the given threshold.
-// If no single error has occurred more than the threshold, but the
-// total number of errors meets the threshold,
-// replicationErr will return errInternal.
-func (es *replicationErrors) Cause() error {
-	if len(es.errs) == 0 {
-		return errorSet{}
+	if threshold < 1 {
+		return err
 	}
 
 	expErrs := expectedErrors{
@@ -1077,32 +961,19 @@ func (es *replicationErrors) Cause() error {
 	}
 	for _, exp := range expErrs {
 		exp.count = 0
-		for _, err := range es.errs {
+		for _, err := range errs {
 			if exp.cause(errors.Cause(err)) {
 				exp.count++
 			}
 		}
 	}
-
 	// Determine which error occurred most.
 	sort.Sort(sort.Reverse(expErrs))
-	if exp := expErrs[0]; exp.count >= es.threshold {
+	if exp := expErrs[0]; exp.count >= threshold {
 		return exp.err
 	}
 
-	if len(es.errs) >= es.threshold {
-		return errInternal
-	}
-
-	return nil
-}
-
-func newReplicationErrors(threshold, numErrors int) []*replicationErrors {
-	errs := make([]*replicationErrors, numErrors)
-	for i := range errs {
-		errs[i] = &replicationErrors{threshold: threshold}
-	}
-	return errs
+	return err
 }
 
 func newPeerGroup(dialOpts ...grpc.DialOption) *peerGroup {

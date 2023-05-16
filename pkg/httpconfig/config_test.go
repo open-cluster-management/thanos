@@ -6,7 +6,7 @@ package httpconfig
 import (
 	"testing"
 
-	"github.com/efficientgo/core/testutil"
+	"github.com/thanos-io/thanos/pkg/testutil"
 )
 
 func TestBuildConfig(t *testing.T) {

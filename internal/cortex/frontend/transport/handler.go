@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -47,6 +48,12 @@ type HandlerConfig struct {
 	LogQueriesLongerThan time.Duration `yaml:"log_queries_longer_than"`
 	MaxBodySize          int64         `yaml:"max_body_size"`
 	QueryStatsEnabled    bool          `yaml:"query_stats_enabled"`
+}
+
+func (cfg *HandlerConfig) RegisterFlags(f *flag.FlagSet) {
+	f.DurationVar(&cfg.LogQueriesLongerThan, "frontend.log-queries-longer-than", 0, "Log queries that are slower than the specified duration. Set to 0 to disable. Set to < 0 to enable on all queries.")
+	f.Int64Var(&cfg.MaxBodySize, "frontend.max-body-size", 10*1024*1024, "Max body size for downstream prometheus.")
+	f.BoolVar(&cfg.QueryStatsEnabled, "frontend.query-stats-enabled", false, "True to enable query statistics tracking. When enabled, a message with some statistics is logged for every query.")
 }
 
 // Handler accepts queries and forwards them to RoundTripper. It can log slow queries,
@@ -154,7 +161,7 @@ func (f *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if shouldReportSlowQuery {
-		f.reportSlowQuery(r, hs, queryString, queryResponseTime)
+		f.reportSlowQuery(r, queryString, queryResponseTime)
 	}
 	if f.cfg.QueryStatsEnabled {
 		f.reportQueryStats(r, queryString, queryResponseTime, stats)
@@ -162,34 +169,13 @@ func (f *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // reportSlowQuery reports slow queries.
-func (f *Handler) reportSlowQuery(r *http.Request, responseHeaders http.Header, queryString url.Values, queryResponseTime time.Duration) {
-	// NOTE(GiedriusS): see https://github.com/grafana/grafana/pull/60301 for more info.
-	grafanaDashboardUID := "-"
-	if dashboardUID := r.Header.Get("X-Dashboard-Uid"); dashboardUID != "" {
-		grafanaDashboardUID = dashboardUID
-	}
-	grafanaPanelID := "-"
-	if panelID := r.Header.Get("X-Panel-Id"); panelID != "" {
-		grafanaPanelID = panelID
-	}
-	thanosTraceID := "-"
-	if traceID := responseHeaders.Get("X-Thanos-Trace-Id"); traceID != "" {
-		thanosTraceID = traceID
-	}
-
-	remoteUser, _, _ := r.BasicAuth()
-
+func (f *Handler) reportSlowQuery(r *http.Request, queryString url.Values, queryResponseTime time.Duration) {
 	logMessage := append([]interface{}{
 		"msg", "slow query detected",
 		"method", r.Method,
 		"host", r.Host,
 		"path", r.URL.Path,
-		"remote_user", remoteUser,
-		"remote_addr", r.RemoteAddr,
 		"time_taken", queryResponseTime.String(),
-		"grafana_dashboard_uid", grafanaDashboardUID,
-		"grafana_panel_id", grafanaPanelID,
-		"trace_id", thanosTraceID,
 	}, formatQueryString(queryString)...)
 
 	level.Info(util_log.WithContext(r.Context(), f.log)).Log(logMessage...)
@@ -204,7 +190,6 @@ func (f *Handler) reportQueryStats(r *http.Request, queryString url.Values, quer
 	wallTime := stats.LoadWallTime()
 	numSeries := stats.LoadFetchedSeries()
 	numBytes := stats.LoadFetchedChunkBytes()
-	remoteUser, _, _ := r.BasicAuth()
 
 	// Track stats.
 	f.querySeconds.WithLabelValues(userID).Add(wallTime.Seconds())
@@ -218,8 +203,6 @@ func (f *Handler) reportQueryStats(r *http.Request, queryString url.Values, quer
 		"component", "query-frontend",
 		"method", r.Method,
 		"path", r.URL.Path,
-		"remote_user", remoteUser,
-		"remote_addr", r.RemoteAddr,
 		"response_time", queryResponseTime,
 		"query_wall_time_seconds", wallTime.Seconds(),
 		"fetched_series_count", numSeries,

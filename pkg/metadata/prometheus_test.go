@@ -15,16 +15,15 @@ import (
 	"github.com/pkg/errors"
 	"github.com/prometheus/prometheus/storage"
 
-	"github.com/efficientgo/core/testutil"
 	"github.com/thanos-io/thanos/pkg/metadata/metadatapb"
 	"github.com/thanos-io/thanos/pkg/promclient"
 	"github.com/thanos-io/thanos/pkg/runutil"
-	"github.com/thanos-io/thanos/pkg/testutil/custom"
+	"github.com/thanos-io/thanos/pkg/testutil"
 	"github.com/thanos-io/thanos/pkg/testutil/e2eutil"
 )
 
 func TestMain(m *testing.M) {
-	custom.TolerantVerifyLeakMain(m)
+	testutil.TolerantVerifyLeakMain(m)
 }
 
 func TestPrometheus_Metadata_e2e(t *testing.T) {

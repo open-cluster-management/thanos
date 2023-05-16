@@ -19,7 +19,7 @@ import (
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/storage"
 
-	"github.com/efficientgo/core/testutil"
+	"github.com/thanos-io/thanos/pkg/testutil"
 )
 
 func TestNewInMemoryIndexCache(t *testing.T) {

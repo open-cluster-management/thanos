@@ -223,7 +223,6 @@ func GatherIndexHealthStats(logger log.Logger, fn string, minTime, maxTime int64
 	var (
 		lastLset labels.Labels
 		lset     labels.Labels
-		builder  labels.ScratchBuilder
 		chks     []chunks.Meta
 
 		seriesLifeDuration                          = newMinMaxSumInt64()
@@ -252,10 +251,9 @@ func GatherIndexHealthStats(logger log.Logger, fn string, minTime, maxTime int64
 		id := p.At()
 		stats.TotalSeries++
 
-		if err := r.Series(id, &builder, &chks); err != nil {
+		if err := r.Series(id, &lset, &chks); err != nil {
 			return stats, errors.Wrap(err, "read series")
 		}
-		lset = builder.Labels()
 		if len(lset) == 0 {
 			return stats, errors.Errorf("empty label set detected for series %d", id)
 		}
@@ -569,16 +567,16 @@ func rewrite(
 		series   = []seriesRepair{}
 	)
 
-	var builder labels.ScratchBuilder
+	var lset labels.Labels
 	var chks []chunks.Meta
 	for all.Next() {
 		id := all.At()
 
-		if err := indexr.Series(id, &builder, &chks); err != nil {
+		if err := indexr.Series(id, &lset, &chks); err != nil {
 			return errors.Wrap(err, "series")
 		}
 		// Make sure labels are in sorted order.
-		builder.Sort()
+		sort.Sort(lset)
 
 		for i, c := range chks {
 			chks[i].Chunk, err = chunkr.Chunk(c)
@@ -597,7 +595,7 @@ func rewrite(
 		}
 
 		series = append(series, seriesRepair{
-			lset: builder.Labels(),
+			lset: lset,
 			chks: chks,
 		})
 	}

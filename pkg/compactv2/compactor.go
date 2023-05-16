@@ -131,7 +131,7 @@ func (w *Compactor) WriteSeries(ctx context.Context, readers []block.Reader, sWr
 			}
 
 			s := set.At()
-			iter := s.Iterator(nil)
+			iter := s.Iterator()
 			for iter.Next() {
 			}
 			if err := iter.Err(); err != nil {

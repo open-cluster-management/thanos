@@ -6,14 +6,13 @@ package exemplars
 import (
 	"testing"
 
-	"github.com/efficientgo/core/testutil"
 	"github.com/thanos-io/thanos/pkg/exemplars/exemplarspb"
 	"github.com/thanos-io/thanos/pkg/store/labelpb"
-	"github.com/thanos-io/thanos/pkg/testutil/custom"
+	"github.com/thanos-io/thanos/pkg/testutil"
 )
 
 func TestMain(m *testing.M) {
-	custom.TolerantVerifyLeakMain(m)
+	testutil.TolerantVerifyLeakMain(m)
 }
 
 func TestDedupExemplarsResponse(t *testing.T) {

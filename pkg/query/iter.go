@@ -4,8 +4,9 @@
 package query
 
 import (
+	"sort"
+
 	"github.com/pkg/errors"
-	"github.com/prometheus/prometheus/model/histogram"
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/tsdb/chunkenc"
@@ -16,27 +17,84 @@ import (
 )
 
 // promSeriesSet implements the SeriesSet interface of the Prometheus storage
-// package on top of our storepb SeriesSet. Overlapping chunks will be naively deduplicated (random selection).
+// package on top of our storepb SeriesSet.
 type promSeriesSet struct {
-	set storepb.SeriesSet
+	set  storepb.SeriesSet
+	done bool
 
 	mint, maxt int64
 	aggrs      []storepb.Aggr
+	initiated  bool
+
+	currLset   labels.Labels
+	currChunks []storepb.AggrChunk
 
 	warns storage.Warnings
 }
 
 func (s *promSeriesSet) Next() bool {
-	return s.set.Next()
+	if !s.initiated {
+		s.initiated = true
+		s.done = s.set.Next()
+	}
+
+	if !s.done {
+		return false
+	}
+
+	// storage.Series are more strict then SeriesSet:
+	// * It requires storage.Series to iterate over full series.
+	s.currLset, s.currChunks = s.set.At()
+	for {
+		s.done = s.set.Next()
+		if !s.done {
+			break
+		}
+		nextLset, nextChunks := s.set.At()
+		if labels.Compare(s.currLset, nextLset) != 0 {
+			break
+		}
+		s.currChunks = append(s.currChunks, nextChunks...)
+	}
+
+	// Samples (so chunks as well) have to be sorted by time.
+	// TODO(bwplotka): Benchmark if we can do better.
+	// For example we could iterate in above loop and write our own binary search based insert sort.
+	// We could also remove duplicates in same loop.
+	sort.Slice(s.currChunks, func(i, j int) bool {
+		return s.currChunks[i].MinTime < s.currChunks[j].MinTime
+	})
+
+	// Proxy handles duplicates between different series, let's handle duplicates within single series now as well.
+	// We don't need to decode those.
+	s.currChunks = removeExactDuplicates(s.currChunks)
+	return true
+}
+
+// removeExactDuplicates returns chunks without 1:1 duplicates.
+// NOTE: input chunks has to be sorted by minTime.
+func removeExactDuplicates(chks []storepb.AggrChunk) []storepb.AggrChunk {
+	if len(chks) <= 1 {
+		return chks
+	}
+
+	ret := make([]storepb.AggrChunk, 0, len(chks))
+	ret = append(ret, chks[0])
+
+	for _, c := range chks[1:] {
+		if ret[len(ret)-1].Compare(c) == 0 {
+			continue
+		}
+		ret = append(ret, c)
+	}
+	return ret
 }
 
 func (s *promSeriesSet) At() storage.Series {
-	if s.set.Err() != nil {
+	if !s.initiated || s.set.Err() != nil {
 		return nil
 	}
-
-	currLset, currChunks := s.set.At()
-	return newChunkSeries(currLset, currChunks, s.mint, s.maxt, s.aggrs)
+	return newChunkSeries(s.currLset, s.currChunks, s.mint, s.maxt, s.aggrs)
 }
 
 func (s *promSeriesSet) Err() error {
@@ -66,11 +124,11 @@ func (s *storeSeriesSet) Next() bool {
 	return true
 }
 
-func (*storeSeriesSet) Err() error {
+func (storeSeriesSet) Err() error {
 	return nil
 }
 
-func (s *storeSeriesSet) At() (labels.Labels, []storepb.AggrChunk) {
+func (s storeSeriesSet) At() (labels.Labels, []storepb.AggrChunk) {
 	return s.series[s.i].PromLabels(), s.series[s.i].Chunks
 }
 
@@ -97,7 +155,7 @@ func (s *chunkSeries) Labels() labels.Labels {
 	return s.lset
 }
 
-func (s *chunkSeries) Iterator(_ chunkenc.Iterator) chunkenc.Iterator {
+func (s *chunkSeries) Iterator() chunkenc.Iterator {
 	var sit chunkenc.Iterator
 	its := make([]chunkenc.Iterator, 0, len(s.chunks))
 
@@ -176,8 +234,6 @@ func chunkEncoding(e storepb.Chunk_Encoding) chunkenc.Encoding {
 	switch e {
 	case storepb.Chunk_XOR:
 		return chunkenc.EncXOR
-	case storepb.Chunk_HISTOGRAM:
-		return chunkenc.EncHistogram
 	}
 	return 255 // Invalid.
 }
@@ -186,20 +242,16 @@ type errSeriesIterator struct {
 	err error
 }
 
-func (errSeriesIterator) Seek(int64) chunkenc.ValueType                        { return chunkenc.ValNone }
-func (errSeriesIterator) Next() chunkenc.ValueType                             { return chunkenc.ValNone }
-func (errSeriesIterator) At() (int64, float64)                                 { return 0, 0 }
-func (errSeriesIterator) AtHistogram() (int64, *histogram.Histogram)           { return 0, nil }
-func (errSeriesIterator) AtFloatHistogram() (int64, *histogram.FloatHistogram) { return 0, nil }
-func (errSeriesIterator) AtT() int64                                           { return 0 }
-func (it errSeriesIterator) Err() error                                        { return it.err }
+func (errSeriesIterator) Seek(int64) bool      { return false }
+func (errSeriesIterator) Next() bool           { return false }
+func (errSeriesIterator) At() (int64, float64) { return 0, 0 }
+func (it errSeriesIterator) Err() error        { return it.err }
 
 // chunkSeriesIterator implements a series iterator on top
 // of a list of time-sorted, non-overlapping chunks.
 type chunkSeriesIterator struct {
-	chunks  []chunkenc.Iterator
-	i       int
-	lastVal chunkenc.ValueType
+	chunks []chunkenc.Iterator
+	i      int
 }
 
 func newChunkSeriesIterator(cs []chunkenc.Iterator) chunkenc.Iterator {
@@ -210,18 +262,17 @@ func newChunkSeriesIterator(cs []chunkenc.Iterator) chunkenc.Iterator {
 	return &chunkSeriesIterator{chunks: cs}
 }
 
-func (it *chunkSeriesIterator) Seek(t int64) chunkenc.ValueType {
+func (it *chunkSeriesIterator) Seek(t int64) (ok bool) {
 	// We generally expect the chunks already to be cut down
 	// to the range we are interested in. There's not much to be gained from
 	// hopping across chunks so we just call next until we reach t.
 	for {
-		ct := it.AtT()
+		ct, _ := it.At()
 		if ct >= t {
-			return it.lastVal
+			return true
 		}
-		it.lastVal = it.Next()
-		if it.lastVal == chunkenc.ValNone {
-			return chunkenc.ValNone
+		if !it.Next() {
+			return false
 		}
 	}
 }
@@ -230,30 +281,17 @@ func (it *chunkSeriesIterator) At() (t int64, v float64) {
 	return it.chunks[it.i].At()
 }
 
-func (it *chunkSeriesIterator) AtHistogram() (int64, *histogram.Histogram) {
-	return it.chunks[it.i].AtHistogram()
-}
+func (it *chunkSeriesIterator) Next() bool {
+	lastT, _ := it.At()
 
-func (it *chunkSeriesIterator) AtFloatHistogram() (int64, *histogram.FloatHistogram) {
-	return it.chunks[it.i].AtFloatHistogram()
-}
-
-func (it *chunkSeriesIterator) AtT() int64 {
-	return it.chunks[it.i].AtT()
-}
-
-func (it *chunkSeriesIterator) Next() chunkenc.ValueType {
-	lastT := it.AtT()
-
-	if valueType := it.chunks[it.i].Next(); valueType != chunkenc.ValNone {
-		it.lastVal = valueType
-		return valueType
+	if it.chunks[it.i].Next() {
+		return true
 	}
 	if it.Err() != nil {
-		return chunkenc.ValNone
+		return false
 	}
 	if it.i >= len(it.chunks)-1 {
-		return chunkenc.ValNone
+		return false
 	}
 	// Chunks are guaranteed to be ordered but not generally guaranteed to not overlap.
 	// We must ensure to skip any overlapping range between adjacent chunks.

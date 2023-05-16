@@ -12,16 +12,12 @@ import (
 	"reflect"
 	"sort"
 	"strconv"
-	"strings"
 	"testing"
 	"time"
 
-	"github.com/efficientgo/core/testutil"
 	"github.com/go-kit/log"
-	"github.com/google/go-cmp/cmp"
 	"github.com/pkg/errors"
 	"github.com/prometheus/common/model"
-	"github.com/prometheus/prometheus/model/histogram"
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/model/timestamp"
 	"github.com/prometheus/prometheus/model/value"
@@ -29,11 +25,13 @@ import (
 	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/tsdb/chunkenc"
 	"github.com/prometheus/prometheus/util/gate"
+
 	"github.com/thanos-io/thanos/pkg/component"
+	"github.com/thanos-io/thanos/pkg/dedup"
 	"github.com/thanos-io/thanos/pkg/store"
 	"github.com/thanos-io/thanos/pkg/store/labelpb"
 	"github.com/thanos-io/thanos/pkg/store/storepb"
-	storetestutil "github.com/thanos-io/thanos/pkg/store/storepb/testutil"
+	"github.com/thanos-io/thanos/pkg/testutil"
 )
 
 type sample struct {
@@ -43,7 +41,7 @@ type sample struct {
 
 func TestQueryableCreator_MaxResolution(t *testing.T) {
 	testProxy := &testStoreServer{resps: []*storepb.SeriesResponse{}}
-	queryableCreator := NewQueryableCreator(nil, nil, newProxyStore(testProxy), 2, 5*time.Second)
+	queryableCreator := NewQueryableCreator(nil, nil, testProxy, 2, 5*time.Second)
 
 	oneHourMillis := int64(1*time.Hour) / int64(time.Millisecond)
 	queryable := queryableCreator(
@@ -86,7 +84,7 @@ func TestQuerier_DownsampledData(t *testing.T) {
 	q := NewQueryableCreator(
 		nil,
 		nil,
-		newProxyStore(testProxy),
+		testProxy,
 		2,
 		timeout,
 	)(false,
@@ -338,7 +336,7 @@ func TestQuerier_Select_AfterPromQL(t *testing.T) {
 
 	for _, tcase := range []struct {
 		name               string
-		storeAPI           *store.ProxyStore
+		storeAPI           storepb.StoreServer
 		replicaLabels      []string // Replica label groups chunks by the label value and strips it from the final result.
 		hints              *storage.SelectHints
 		equivalentQuery    string
@@ -350,11 +348,11 @@ func TestQuerier_Select_AfterPromQL(t *testing.T) {
 		{
 			// Regression test 1 against https://github.com/thanos-io/thanos/issues/2890.
 			name: "when switching replicas don't miss samples when set with a big enough lookback delta",
-			storeAPI: newProxyStore(func() storepb.StoreServer {
+			storeAPI: func() storepb.StoreServer {
 				s, err := store.NewLocalStoreFromJSONMmappableFile(logger, component.Debug, nil, "./testdata/issue2890-seriesresponses.json", store.ScanGRPCCurlProtoStreamMessages)
 				testutil.Ok(t, err)
 				return s
-			}()),
+			}(),
 			equivalentQuery: `cluster_version{}`,
 			replicaLabels:   []string{"replica"},
 			hints: &storage.SelectHints{
@@ -425,8 +423,8 @@ func TestQuerier_Select(t *testing.T) {
 	logger := log.NewLogfmtLogger(os.Stderr)
 
 	for _, tcase := range []struct {
-		name           string
-		storeEndpoints []storepb.StoreServer
+		name     string
+		storeAPI storepb.StoreServer
 
 		mint, maxt      int64
 		matchers        []*labels.Matcher
@@ -435,35 +433,29 @@ func TestQuerier_Select(t *testing.T) {
 		equivalentQuery string
 
 		expected           []series
-		expectedAfterDedup []series
+		expectedAfterDedup series
 		expectedWarning    string
 	}{
 		{
 			name: "select overlapping data with partial error",
-			storeEndpoints: []storepb.StoreServer{
-				&testStoreServer{
-					resps: []*storepb.SeriesResponse{
-						storeSeriesResponse(t, labels.FromStrings("a", "a"), []sample{{0, 0}, {2, 1}, {3, 2}}),
-						storepb.NewWarnSeriesResponse(errors.New("partial error")),
-						storeSeriesResponse(t, labels.FromStrings("a", "a"), []sample{{5, 5}, {6, 6}, {7, 7}}),
-						storeSeriesResponse(t, labels.FromStrings("a", "a"), []sample{{5, 5}, {6, 66}}),
-						storeSeriesResponse(t, labels.FromStrings("a", "b"), []sample{{2, 2}, {3, 3}, {4, 4}}, []sample{{1, 1}, {2, 2}, {3, 3}}),
-						storeSeriesResponse(t, labels.FromStrings("a", "c"), []sample{{100, 1}, {300, 3}, {400, 4}}),
-					},
+			storeAPI: &testStoreServer{
+				resps: []*storepb.SeriesResponse{
+					storeSeriesResponse(t, labels.FromStrings("a", "a"), []sample{{0, 0}, {2, 1}, {3, 2}}),
+					storepb.NewWarnSeriesResponse(errors.New("partial error")),
+					storeSeriesResponse(t, labels.FromStrings("a", "a"), []sample{{5, 5}, {6, 6}, {7, 7}}),
+					storeSeriesResponse(t, labels.FromStrings("a", "a"), []sample{{5, 5}, {6, 66}}), // Overlap samples for some reason.
+					storeSeriesResponse(t, labels.FromStrings("a", "b"), []sample{{2, 2}, {3, 3}, {4, 4}}, []sample{{1, 1}, {2, 2}, {3, 3}}),
+					storeSeriesResponse(t, labels.FromStrings("a", "c"), []sample{{100, 1}, {300, 3}, {400, 4}}),
 				},
 			},
 			mint: 1, maxt: 300,
 			replicaLabels:   []string{"a"},
 			equivalentQuery: `{a=~"a|b|c"}`,
-			matchers: []*labels.Matcher{{
-				Value: "a|b|c",
-				Name:  "a",
-				Type:  labels.MatchRegexp,
-			}},
+
 			expected: []series{
 				{
 					lset:    labels.FromStrings("a", "a"),
-					samples: []sample{{2, 1}, {3, 2}, {5, 5}, {6, 66}, {7, 7}},
+					samples: []sample{{2, 1}, {3, 2}, {5, 5}, {6, 6}, {7, 7}},
 				},
 				{
 					lset:    labels.FromStrings("a", "b"),
@@ -474,20 +466,20 @@ func TestQuerier_Select(t *testing.T) {
 					samples: []sample{{100, 1}, {300, 3}},
 				},
 			},
-			expectedAfterDedup: []series{{
-				lset: nil,
+			expectedAfterDedup: series{
+				lset: labels.Labels{},
 				// We don't expect correctness here, it's just random non-replica data.
-				samples: []sample{{1, 1}, {2, 2}, {3, 3}, {5, 5}, {6, 6}, {7, 7}},
-			}},
+				samples: []sample{{1, 1}, {2, 2}, {3, 3}, {4, 4}},
+			},
 			expectedWarning: "partial error",
 		},
 		{
 			name: "realistic data with stale marker",
-			storeEndpoints: []storepb.StoreServer{func() storepb.StoreServer {
+			storeAPI: func() storepb.StoreServer {
 				s, err := store.NewLocalStoreFromJSONMmappableFile(logger, component.Debug, nil, "./testdata/issue2401-seriesresponses.json", store.ScanGRPCCurlProtoStreamMessages)
 				testutil.Ok(t, err)
 				return s
-			}()},
+			}(),
 			mint: realSeriesWithStaleMarkerMint, maxt: realSeriesWithStaleMarkerMaxt,
 			replicaLabels: []string{"replica"},
 			matchers: []*labels.Matcher{{
@@ -515,7 +507,7 @@ func TestQuerier_Select(t *testing.T) {
 					samples: expectedRealSeriesWithStaleMarkerReplica1,
 				},
 			},
-			expectedAfterDedup: []series{{
+			expectedAfterDedup: series{
 				lset: labels.FromStrings(
 					// No replica label anymore.
 					"__name__", "gitlab_transaction_cache_read_hit_count_total", "action", "widget.json", "controller", "Projects::MergeRequests::ContentController", "env", "gprd", "environment",
@@ -523,15 +515,15 @@ func TestQuerier_Select(t *testing.T) {
 					"gcp", "region", "us-east", "shard", "default", "stage", "main", "tier", "sv", "type", "web",
 				),
 				samples: expectedRealSeriesWithStaleMarkerDeduplicated,
-			}},
+			},
 		},
 		{
 			name: "realistic data with stale marker with 100000 step",
-			storeEndpoints: []storepb.StoreServer{func() storepb.StoreServer {
+			storeAPI: func() storepb.StoreServer {
 				s, err := store.NewLocalStoreFromJSONMmappableFile(logger, component.Debug, nil, "./testdata/issue2401-seriesresponses.json", store.ScanGRPCCurlProtoStreamMessages)
 				testutil.Ok(t, err)
 				return s
-			}()},
+			}(),
 			mint: realSeriesWithStaleMarkerMint, maxt: realSeriesWithStaleMarkerMaxt,
 			replicaLabels: []string{"replica"},
 			matchers: []*labels.Matcher{{
@@ -564,7 +556,7 @@ func TestQuerier_Select(t *testing.T) {
 					samples: expectedRealSeriesWithStaleMarkerReplica1,
 				},
 			},
-			expectedAfterDedup: []series{{
+			expectedAfterDedup: series{
 				lset: labels.FromStrings(
 					// No replica label anymore.
 					"__name__", "gitlab_transaction_cache_read_hit_count_total", "action", "widget.json", "controller", "Projects::MergeRequests::ContentController", "env", "gprd", "environment",
@@ -572,17 +564,17 @@ func TestQuerier_Select(t *testing.T) {
 					"gcp", "region", "us-east", "shard", "default", "stage", "main", "tier", "sv", "type", "web",
 				),
 				samples: expectedRealSeriesWithStaleMarkerDeduplicated,
-			}},
+			},
 		},
 		{
 			// Regression test against https://github.com/thanos-io/thanos/issues/2401.
 			// Thanks to @Superq and GitLab for real data reproducing this.
 			name: "realistic data with stale marker with hints rate function",
-			storeEndpoints: []storepb.StoreServer{func() storepb.StoreServer {
+			storeAPI: func() storepb.StoreServer {
 				s, err := store.NewLocalStoreFromJSONMmappableFile(logger, component.Debug, nil, "./testdata/issue2401-seriesresponses.json", store.ScanGRPCCurlProtoStreamMessages)
 				testutil.Ok(t, err)
 				return s
-			}()},
+			}(),
 			mint: realSeriesWithStaleMarkerMint, maxt: realSeriesWithStaleMarkerMaxt,
 			replicaLabels: []string{"replica"},
 			matchers: []*labels.Matcher{{
@@ -616,141 +608,13 @@ func TestQuerier_Select(t *testing.T) {
 					samples: expectedRealSeriesWithStaleMarkerReplica1ForRate,
 				},
 			},
-			expectedAfterDedup: []series{{
+			expectedAfterDedup: series{
 				lset: labels.FromStrings(
 					"__name__", "gitlab_transaction_cache_read_hit_count_total", "action", "widget.json", "controller", "Projects::MergeRequests::ContentController", "env", "gprd", "environment",
 					"gprd", "fqdn", "web-08-sv-gprd.c.gitlab-production.internal", "instance", "web-08-sv-gprd.c.gitlab-production.internal:8083", "job", "gitlab-rails", "monitor", "app", "provider",
 					"gcp", "region", "us-east", "shard", "default", "stage", "main", "tier", "sv", "type", "web",
 				),
 				samples: expectedRealSeriesWithStaleMarkerDeduplicatedForRate,
-			}},
-		},
-		// Tests with proxy (integration test with store.ProxyStore).
-		{
-			name: "select with proxied Store APIs that does not support without replica label",
-			storeEndpoints: []storepb.StoreServer{
-				&testStoreServer{
-					resps: []*storepb.SeriesResponse{
-						storeSeriesResponse(t, labels.FromStrings("a", "1", "r", "1", "w", "1"), []sample{{0, 0}, {2, 1}, {3, 2}}),
-						storeSeriesResponse(t, labels.FromStrings("a", "1", "r", "1", "w", "1"), []sample{{5, 5}, {6, 6}, {7, 7}}),
-						storeSeriesResponse(t, labels.FromStrings("a", "1", "r", "1", "x", "1"), []sample{{2, 2}, {3, 3}, {4, 4}}, []sample{{1, 1}, {2, 2}, {3, 3}}),
-						storeSeriesResponse(t, labels.FromStrings("a", "1", "r", "1", "x", "1"), []sample{{100, 1}, {300, 3}, {400, 4}}),
-						storeSeriesResponse(t, labels.FromStrings("a", "1", "r", "2", "w", "1"), []sample{{5, 5}, {7, 7}}),
-					},
-				},
-				&testStoreServer{
-					resps: []*storepb.SeriesResponse{
-						storeSeriesResponse(t, labels.FromStrings("a", "1", "r", "2", "w", "1"), []sample{{2, 1}}),
-						storeSeriesResponse(t, labels.FromStrings("a", "1", "r", "2", "w", "1"), []sample{{5, 5}, {6, 6}, {7, 7}}),
-						storeSeriesResponse(t, labels.FromStrings("a", "1", "r", "2", "x", "2"), []sample{{10, 10}, {30, 30}, {40, 40}}),
-					},
-				},
-			},
-			mint: 1, maxt: 300,
-			replicaLabels:   []string{"r"},
-			equivalentQuery: `{a=~"1"}`,
-			matchers:        []*labels.Matcher{{Name: "a", Value: "1", Type: labels.MatchRegexp}},
-			expected: []series{
-				{
-					lset:    labels.FromStrings("a", "1", "r", "1", "w", "1"),
-					samples: []sample{{2, 1}, {3, 2}, {5, 5}, {6, 6}, {7, 7}},
-				},
-				{
-					lset:    labels.FromStrings("a", "1", "r", "1", "x", "1"),
-					samples: []sample{{1, 1}, {2, 2}, {3, 3}, {4, 4}, {100, 1}, {300, 3}},
-				},
-				{
-					lset:    labels.FromStrings("a", "1", "r", "2", "w", "1"),
-					samples: []sample{{2, 1}, {5, 5}, {6, 6}, {7, 7}},
-				},
-				{
-					lset:    labels.FromStrings("a", "1", "r", "2", "x", "2"),
-					samples: []sample{{10, 10}, {30, 30}, {40, 40}},
-				},
-			},
-			expectedAfterDedup: []series{
-				{
-					lset: labels.FromStrings("a", "1", "w", "1"),
-					// We don't expect correctness here, it's just random non-replica data.
-					samples: []sample{{2, 1}, {3, 2}, {5, 5}, {6, 6}, {7, 7}},
-				},
-				{
-					lset: labels.FromStrings("a", "1", "x", "1"),
-					// We don't expect correctness here, it's just random non-replica data.
-					samples: []sample{{1, 1}, {2, 2}, {3, 3}, {100, 1}, {300, 3}},
-				},
-				{
-					lset: labels.FromStrings("a", "1", "x", "2"),
-					// We don't expect correctness here, it's just random non-replica data.
-					samples: []sample{{10, 10}, {30, 30}, {40, 40}},
-				},
-			},
-		},
-		{
-			name: "select with proxied Store APIs with some stores supporting without replica labels feature",
-			storeEndpoints: []storepb.StoreServer{
-				&testStoreServer{
-					resps: []*storepb.SeriesResponse{
-						storeSeriesResponse(t, labels.FromStrings("a", "1", "r", "1", "w", "1"), []sample{{0, 0}, {2, 1}, {3, 2}}),
-						storeSeriesResponse(t, labels.FromStrings("a", "1", "r", "1", "w", "1"), []sample{{5, 5}, {6, 6}, {7, 7}}),
-						storeSeriesResponse(t, labels.FromStrings("a", "1", "r", "1", "x", "1"), []sample{{2, 2}, {3, 3}, {4, 4}}, []sample{{1, 1}, {2, 2}, {3, 3}}),
-						storeSeriesResponse(t, labels.FromStrings("a", "1", "r", "1", "x", "1"), []sample{{100, 1}, {300, 3}, {400, 4}}),
-						storeSeriesResponse(t, labels.FromStrings("a", "1", "r", "2", "w", "1"), []sample{{5, 5}, {7, 7}}),
-					},
-					respsWithoutReplicaLabels: []*storepb.SeriesResponse{
-						storeSeriesResponse(t, labels.FromStrings("a", "1", "w", "1"), []sample{{5, 5}, {7, 7}}),
-						storeSeriesResponse(t, labels.FromStrings("a", "1", "w", "1"), []sample{{0, 0}, {2, 1}, {3, 2}}),
-						storeSeriesResponse(t, labels.FromStrings("a", "1", "w", "1"), []sample{{5, 5}, {6, 6}, {7, 7}}),
-						storeSeriesResponse(t, labels.FromStrings("a", "1", "x", "1"), []sample{{2, 2}, {3, 3}, {4, 4}}, []sample{{1, 1}, {2, 2}, {3, 3}}),
-						storeSeriesResponse(t, labels.FromStrings("a", "1", "x", "1"), []sample{{100, 1}, {300, 3}, {400, 4}}),
-					},
-				},
-				&testStoreServer{
-					resps: []*storepb.SeriesResponse{
-						storeSeriesResponse(t, labels.FromStrings("a", "1", "r", "2", "w", "1"), []sample{{2, 1}}),
-						storeSeriesResponse(t, labels.FromStrings("a", "1", "r", "2", "w", "1"), []sample{{5, 5}, {6, 6}, {7, 7}}),
-						storeSeriesResponse(t, labels.FromStrings("a", "1", "r", "2", "x", "2"), []sample{{10, 10}, {30, 30}, {40, 40}}),
-					},
-				},
-			},
-			mint: 1, maxt: 300,
-			replicaLabels:   []string{"r"},
-			equivalentQuery: `{a=~"1"}`,
-			matchers:        []*labels.Matcher{{Name: "a", Value: "1", Type: labels.MatchRegexp}},
-			expected: []series{
-				{
-					lset:    labels.FromStrings("a", "1", "r", "1", "w", "1"),
-					samples: []sample{{2, 1}, {3, 2}, {5, 5}, {6, 6}, {7, 7}},
-				},
-				{
-					lset:    labels.FromStrings("a", "1", "r", "1", "x", "1"),
-					samples: []sample{{1, 1}, {2, 2}, {3, 3}, {4, 4}, {100, 1}, {300, 3}},
-				},
-				{
-					lset:    labels.FromStrings("a", "1", "r", "2", "w", "1"),
-					samples: []sample{{2, 1}, {5, 5}, {6, 6}, {7, 7}},
-				},
-				{
-					lset:    labels.FromStrings("a", "1", "r", "2", "x", "2"),
-					samples: []sample{{10, 10}, {30, 30}, {40, 40}},
-				},
-			},
-			expectedAfterDedup: []series{
-				{
-					lset: labels.FromStrings("a", "1", "w", "1"),
-					// We don't expect correctness here, it's just random non-replica data.
-					samples: []sample{{2, 1}, {3, 2}, {5, 5}, {6, 6}, {7, 7}},
-				},
-				{
-					lset: labels.FromStrings("a", "1", "x", "1"),
-					// We don't expect correctness here, it's just random non-replica data.
-					samples: []sample{{1, 1}, {2, 2}, {3, 3}, {100, 1}, {300, 3}},
-				},
-				{
-					lset: labels.FromStrings("a", "1", "x", "2"),
-					// We don't expect correctness here, it's just random non-replica data.
-					samples: []sample{{10, 10}, {30, 30}, {40, 40}},
-				},
 			},
 		},
 	} {
@@ -767,27 +631,10 @@ func TestQuerier_Select(t *testing.T) {
 				expected []series
 			}{
 				{dedup: false, expected: tcase.expected},
-				{dedup: true, expected: tcase.expectedAfterDedup},
+				{dedup: true, expected: []series{tcase.expectedAfterDedup}},
 			} {
 				g := gate.New(2)
-				q := newQuerier(
-					context.Background(),
-					nil,
-					tcase.mint,
-					tcase.maxt,
-					tcase.replicaLabels,
-					nil,
-					newProxyStore(tcase.storeEndpoints...),
-					sc.dedup,
-					0,
-					true,
-					false,
-					false,
-					g,
-					timeout,
-					nil,
-					NoopSeriesStatsReporter,
-				)
+				q := newQuerier(context.Background(), nil, tcase.mint, tcase.maxt, tcase.replicaLabels, nil, tcase.storeAPI, sc.dedup, 0, true, false, false, g, timeout, nil, func(i storepb.SeriesStatsCounter) {})
 				t.Cleanup(func() { testutil.Ok(t, q.Close()) })
 
 				t.Run(fmt.Sprintf("dedup=%v", sc.dedup), func(t *testing.T) {
@@ -830,39 +677,6 @@ func TestQuerier_Select(t *testing.T) {
 	}
 }
 
-func newProxyStore(storeAPIs ...storepb.StoreServer) *store.ProxyStore {
-	cls := make([]store.Client, len(storeAPIs))
-	for i, s := range storeAPIs {
-		var withoutReplicaLabelsEnabled bool
-		if srv, ok := s.(*testStoreServer); ok {
-			withoutReplicaLabelsEnabled = len(srv.respsWithoutReplicaLabels) > 0
-		}
-		cls[i] = &storetestutil.TestClient{
-			Name:        fmt.Sprintf("%v", i),
-			StoreClient: storepb.ServerAsClient(s, 0),
-			MinTime:     math.MinInt64, MaxTime: math.MaxInt64,
-			WithoutReplicaLabelsEnabled: withoutReplicaLabelsEnabled,
-		}
-	}
-
-	return store.NewProxyStore(
-		nil,
-		nil,
-		func() []store.Client { return cls },
-		component.Query,
-		nil,
-		0,
-		store.EagerRetrieval,
-	)
-}
-
-var emptyLabelsSameAsNotAllocatedLabels = cmp.Transformer("", func(l labels.Labels) labels.Labels {
-	if len(l) == 0 {
-		return labels.Labels(nil)
-	}
-	return l
-})
-
 func testSelectResponse(t *testing.T, expected []series, res storage.SeriesSet) {
 	var series []storage.Series
 	// Use it as PromQL would do, first gather all series.
@@ -870,17 +684,11 @@ func testSelectResponse(t *testing.T, expected []series, res storage.SeriesSet) 
 		series = append(series, res.At())
 	}
 	testutil.Ok(t, res.Err())
-	testutil.Equals(t, len(expected), len(series), "got %v series", func() string {
-		var ret []string
-		for _, s := range series {
-			ret = append(ret, s.Labels().String())
-		}
-		return strings.Join(ret, ",")
-	}())
+	testutil.Equals(t, len(expected), len(series))
 
 	for i, s := range series {
-		testutil.WithGoCmp(emptyLabelsSameAsNotAllocatedLabels).Equals(t, expected[i].lset, s.Labels())
-		samples := expandSeries(t, s.Iterator(nil))
+		testutil.Equals(t, expected[i].lset, s.Labels())
+		samples := expandSeries(t, s.Iterator())
 		expectedCpy := make([]sample, 0, len(expected[i].samples))
 		for _, s := range expected[i].samples {
 			v := s.v
@@ -891,7 +699,7 @@ func testSelectResponse(t *testing.T, expected []series, res storage.SeriesSet) 
 			}
 			expectedCpy = append(expectedCpy, sample{t: s.t, v: v})
 		}
-		testutil.Equals(t, expectedCpy, samples, "samples for series %v does not match", s.Labels())
+		testutil.Equals(t, expectedCpy, samples, "samples for series %v does not match", i)
 	}
 }
 
@@ -1016,17 +824,11 @@ func newMockedSeriesIterator(samples []sample) *mockedSeriesIterator {
 	return &mockedSeriesIterator{samples: samples, cur: -1}
 }
 
-// TODO(rabenhorst): Native histogram support needs to be implemented, currently float type is hardcoded.
-func (s *mockedSeriesIterator) Seek(t int64) chunkenc.ValueType {
+func (s *mockedSeriesIterator) Seek(t int64) bool {
 	s.cur = sort.Search(len(s.samples), func(n int) bool {
 		return s.samples[n].t >= t
 	})
-
-	if s.cur < len(s.samples) {
-		return chunkenc.ValFloat
-	}
-
-	return chunkenc.ValNone
+	return s.cur < len(s.samples)
 }
 
 func (s *mockedSeriesIterator) At() (t int64, v float64) {
@@ -1034,26 +836,9 @@ func (s *mockedSeriesIterator) At() (t int64, v float64) {
 	return sample.t, sample.v
 }
 
-// TODO(rabenhorst): Needs to be implemented for native histogram support.
-func (s *mockedSeriesIterator) AtHistogram() (int64, *histogram.Histogram) {
-	panic("not implemented")
-}
-
-func (s *mockedSeriesIterator) AtFloatHistogram() (int64, *histogram.FloatHistogram) {
-	panic("not implemented")
-}
-
-func (s *mockedSeriesIterator) AtT() int64 {
-	return s.samples[s.cur].t
-}
-
-func (s *mockedSeriesIterator) Next() chunkenc.ValueType {
+func (s *mockedSeriesIterator) Next() bool {
 	s.cur++
-	if s.cur < len(s.samples) {
-		return chunkenc.ValFloat
-	}
-
-	return chunkenc.ValNone
+	return s.cur < len(s.samples)
 }
 
 func (s *mockedSeriesIterator) Err() error { return nil }
@@ -1078,7 +863,7 @@ func TestQuerierWithDedupUnderstoodByPromQL_Rate(t *testing.T) {
 
 		timeout := 100 * time.Second
 		g := gate.New(2)
-		q := newQuerier(context.Background(), logger, realSeriesWithStaleMarkerMint, realSeriesWithStaleMarkerMaxt, []string{"replica"}, nil, newProxyStore(s), false, 0, true, false, false, g, timeout, nil, NoopSeriesStatsReporter)
+		q := newQuerier(context.Background(), logger, realSeriesWithStaleMarkerMint, realSeriesWithStaleMarkerMaxt, []string{"replica"}, nil, s, false, 0, true, false, false, g, timeout, nil, NoopSeriesStatsReporter)
 		t.Cleanup(func() {
 			testutil.Ok(t, q.Close())
 		})
@@ -1100,20 +885,20 @@ func TestQuerierWithDedupUnderstoodByPromQL_Rate(t *testing.T) {
 			testutil.Ok(t, err)
 			testutil.Equals(t, promql.Matrix{
 				{Metric: expectedLset1, Points: []promql.Point{
-					{T: 1587690300000, V: 13.652631578947368}, {T: 1587690400000, V: 14.049122807017543}, {T: 1587690500000, V: 13.961403508771928}, {T: 1587690600000, V: 13.617543859649121}, {T: 1587690700000, V: 14.568421052631578}, {T: 1587690800000, V: 14.989473684210525},
-					{T: 1587690900000, V: 16.2}, {T: 1587691000000, V: 16.052631578947366}, {T: 1587691100000, V: 15.831578947368419}, {T: 1587691200000, V: 15.659649122807016}, {T: 1587691300000, V: 14.842105263157894}, {T: 1587691400000, V: 14.003508771929823},
-					{T: 1587691500000, V: 13.782456140350876}, {T: 1587691600000, V: 13.86315789473684}, {T: 1587691700000, V: 15.270282598474376}, {T: 1587691800000, V: 14.343859649122805}, {T: 1587691900000, V: 13.975438596491227}, {T: 1587692000000, V: 13.399999999999999},
-					{T: 1587692100000, V: 14.087719298245613}, {T: 1587692200000, V: 14.392982456140349}, {T: 1587692300000, V: 15.02456140350877}, {T: 1587692400000, V: 14.073684210526315}, {T: 1587692500000, V: 9.3772165751634}, {T: 1587692600000, V: 6.378947368421052},
-					{T: 1587692700000, V: 8.19298245614035}, {T: 1587692800000, V: 11.91870302641626}, {T: 1587692900000, V: 13.75813610765101}, {T: 1587693000000, V: 13.087719298245613}, {T: 1587693100000, V: 13.466666666666665}, {T: 1587693200000, V: 14.028070175438595},
-					{T: 1587693300000, V: 14.23859649122807}, {T: 1587693400000, V: 15.407017543859647}, {T: 1587693500000, V: 15.915789473684208}, {T: 1587693600000, V: 15.712280701754384},
+					{T: 1587690300000, V: 13.652631578947368}, {T: 1587690400000, V: 14.049122807017545}, {T: 1587690500000, V: 13.961403508771928}, {T: 1587690600000, V: 13.617543859649123}, {T: 1587690700000, V: 14.568421052631578}, {T: 1587690800000, V: 14.989473684210525},
+					{T: 1587690900000, V: 16.2}, {T: 1587691000000, V: 16.052631578947366}, {T: 1587691100000, V: 15.831578947368419}, {T: 1587691200000, V: 15.659649122807016}, {T: 1587691300000, V: 14.842105263157894}, {T: 1587691400000, V: 14.003508771929825},
+					{T: 1587691500000, V: 13.782456140350877}, {T: 1587691600000, V: 13.863157894736842}, {T: 1587691700000, V: 15.270282598474374}, {T: 1587691800000, V: 14.343859649122805}, {T: 1587691900000, V: 13.975438596491228}, {T: 1587692000000, V: 13.4},
+					{T: 1587692100000, V: 14.087719298245615}, {T: 1587692200000, V: 14.39298245614035}, {T: 1587692300000, V: 15.024561403508772}, {T: 1587692400000, V: 14.073684210526313}, {T: 1587692500000, V: 9.3772165751634}, {T: 1587692600000, V: 6.378947368421052},
+					{T: 1587692700000, V: 8.19298245614035}, {T: 1587692800000, V: 11.918703026416258}, {T: 1587692900000, V: 13.75813610765101}, {T: 1587693000000, V: 13.087719298245615}, {T: 1587693100000, V: 13.466666666666667}, {T: 1587693200000, V: 14.028070175438595},
+					{T: 1587693300000, V: 14.23859649122807}, {T: 1587693400000, V: 15.407017543859647}, {T: 1587693500000, V: 15.915789473684208}, {T: 1587693600000, V: 15.712280701754386},
 				}},
 				{Metric: expectedLset2, Points: []promql.Point{
-					{T: 1587690300000, V: 13.691228070175438}, {T: 1587690400000, V: 14.098245614035086}, {T: 1587690500000, V: 13.905263157894735}, {T: 1587690600000, V: 13.617543859649121}, {T: 1587690700000, V: 14.350877192982455}, {T: 1587690800000, V: 15.003508771929823},
-					{T: 1587690900000, V: 16.12280701754386}, {T: 1587691000000, V: 16.049122807017543}, {T: 1587691100000, V: 15.922807017543859}, {T: 1587691200000, V: 15.63157894736842}, {T: 1587691300000, V: 14.982456140350875}, {T: 1587691400000, V: 14.187259188557553},
-					{T: 1587691500000, V: 13.828070175438596}, {T: 1587691600000, V: 13.971929824561402}, {T: 1587691700000, V: 15.31994329585807}, {T: 1587691800000, V: 14.30877192982456}, {T: 1587691900000, V: 13.915789473684208}, {T: 1587692000000, V: 13.312280701754384},
-					{T: 1587692100000, V: 14.136842105263156}, {T: 1587692200000, V: 14.392982456140349}, {T: 1587692300000, V: 15.014035087719297}, {T: 1587692400000, V: 14.112280701754385}, {T: 1587692500000, V: 9.421065148148148}, {T: 1587692600000, V: 6.421368067203301},
-					{T: 1587692700000, V: 8.252631578947367}, {T: 1587692800000, V: 11.721237543747266}, {T: 1587692900000, V: 13.842105263157894}, {T: 1587693000000, V: 13.153509064307993}, {T: 1587693100000, V: 13.378947368421052}, {T: 1587693200000, V: 14.03157894736842},
-					{T: 1587693300000, V: 14.14736842105263}, {T: 1587693400000, V: 15.343159785693986}, {T: 1587693500000, V: 15.90877192982456}, {T: 1587693600000, V: 15.761403508771927},
+					{T: 1587690300000, V: 13.69122807017544}, {T: 1587690400000, V: 14.098245614035086}, {T: 1587690500000, V: 13.905263157894735}, {T: 1587690600000, V: 13.617543859649123}, {T: 1587690700000, V: 14.350877192982455}, {T: 1587690800000, V: 15.003508771929825},
+					{T: 1587690900000, V: 16.12280701754386}, {T: 1587691000000, V: 16.049122807017543}, {T: 1587691100000, V: 15.922807017543859}, {T: 1587691200000, V: 15.63157894736842}, {T: 1587691300000, V: 14.982456140350878}, {T: 1587691400000, V: 14.187259188557551},
+					{T: 1587691500000, V: 13.828070175438594}, {T: 1587691600000, V: 13.971929824561403}, {T: 1587691700000, V: 15.31994329585807}, {T: 1587691800000, V: 14.30877192982456}, {T: 1587691900000, V: 13.915789473684212}, {T: 1587692000000, V: 13.312280701754384},
+					{T: 1587692100000, V: 14.136842105263158}, {T: 1587692200000, V: 14.39298245614035}, {T: 1587692300000, V: 15.014035087719297}, {T: 1587692400000, V: 14.112280701754386}, {T: 1587692500000, V: 9.421065148148147}, {T: 1587692600000, V: 6.421368067203301},
+					{T: 1587692700000, V: 8.252631578947367}, {T: 1587692800000, V: 11.721237543747266}, {T: 1587692900000, V: 13.842105263157894}, {T: 1587693000000, V: 13.153509064307995}, {T: 1587693100000, V: 13.378947368421052}, {T: 1587693200000, V: 14.03157894736842},
+					{T: 1587693300000, V: 14.147368421052631}, {T: 1587693400000, V: 15.343159785693985}, {T: 1587693500000, V: 15.90877192982456}, {T: 1587693600000, V: 15.761403508771927},
 				}},
 			}, vec)
 		})
@@ -1129,10 +914,10 @@ func TestQuerierWithDedupUnderstoodByPromQL_Rate(t *testing.T) {
 			testutil.Ok(t, err)
 			testutil.Equals(t, promql.Matrix{
 				{Metric: expectedLset1, Points: []promql.Point{
-					{T: 1587691800000, V: 14.457142857142856}, {T: 1587692300000, V: 14.761904761904761}, {T: 1587692800000, V: 13.127170868347338}, {T: 1587693300000, V: 12.93501400560224},
+					{T: 1587691800000, V: 14.457142857142856}, {T: 1587692300000, V: 14.761904761904761}, {T: 1587692800000, V: 13.127170868347338}, {T: 1587693300000, V: 12.935014005602241},
 				}},
 				{Metric: expectedLset2, Points: []promql.Point{
-					{T: 1587691800000, V: 14.464425770308122}, {T: 1587692300000, V: 14.763025210084033}, {T: 1587692800000, V: 13.148909112808576}, {T: 1587693300000, V: 12.92829131652661},
+					{T: 1587691800000, V: 14.464425770308123}, {T: 1587692300000, V: 14.763025210084033}, {T: 1587692800000, V: 13.148909112808576}, {T: 1587693300000, V: 12.928291316526611},
 				}},
 			}, vec)
 		})
@@ -1148,7 +933,7 @@ func TestQuerierWithDedupUnderstoodByPromQL_Rate(t *testing.T) {
 
 		timeout := 5 * time.Second
 		g := gate.New(2)
-		q := newQuerier(context.Background(), logger, realSeriesWithStaleMarkerMint, realSeriesWithStaleMarkerMaxt, []string{"replica"}, nil, newProxyStore(s), true, 0, true, false, false, g, timeout, nil, NoopSeriesStatsReporter)
+		q := newQuerier(context.Background(), logger, realSeriesWithStaleMarkerMint, realSeriesWithStaleMarkerMaxt, []string{"replica"}, nil, s, true, 0, true, false, false, g, timeout, nil, NoopSeriesStatsReporter)
 		t.Cleanup(func() {
 			testutil.Ok(t, q.Close())
 		})
@@ -1170,15 +955,15 @@ func TestQuerierWithDedupUnderstoodByPromQL_Rate(t *testing.T) {
 			testutil.Ok(t, err)
 			testutil.Equals(t, promql.Matrix{
 				{Metric: expectedLset, Points: []promql.Point{
-					{T: 1587690300000, V: 13.691228070175438}, {T: 1587690400000, V: 14.098245614035086}, {T: 1587690500000, V: 13.905263157894735}, {T: 1587690600000, V: 13.617543859649121},
-					{T: 1587690700000, V: 14.350877192982455}, {T: 1587690800000, V: 15.003508771929823}, {T: 1587690900000, V: 16.12280701754386}, {T: 1587691000000, V: 16.049122807017543},
-					{T: 1587691100000, V: 15.922807017543859}, {T: 1587691200000, V: 15.63157894736842}, {T: 1587691300000, V: 14.982456140350875}, {T: 1587691400000, V: 14.187259188557553},
-					{T: 1587691500000, V: 13.828070175438596}, {T: 1587691600000, V: 13.971929824561402}, {T: 1587691700000, V: 15.31994329585807}, {T: 1587691800000, V: 14.30877192982456},
-					{T: 1587691900000, V: 13.915789473684208}, {T: 1587692000000, V: 13.312280701754384}, {T: 1587692100000, V: 14.136842105263156}, {T: 1587692200000, V: 14.392982456140349},
-					{T: 1587692300000, V: 15.014035087719297}, {T: 1587692400000, V: 14.112280701754385}, {T: 1587692500000, V: 9.421065148148148}, {T: 1587692600000, V: 6.3736754978451735},
-					{T: 1587692700000, V: 8.19632056099571}, {T: 1587692800000, V: 11.91870302641626}, {T: 1587692900000, V: 13.75813610765101}, {T: 1587693000000, V: 13.087719298245613},
-					{T: 1587693100000, V: 13.466666666666665}, {T: 1587693200000, V: 14.028070175438595}, {T: 1587693300000, V: 14.23859649122807}, {T: 1587693400000, V: 15.407017543859647},
-					{T: 1587693500000, V: 15.915789473684208}, {T: 1587693600000, V: 15.712280701754384},
+					{T: 1587690300000, V: 13.69122807017544}, {T: 1587690400000, V: 14.098245614035086}, {T: 1587690500000, V: 13.905263157894735}, {T: 1587690600000, V: 13.617543859649123},
+					{T: 1587690700000, V: 14.350877192982455}, {T: 1587690800000, V: 15.003508771929825}, {T: 1587690900000, V: 16.12280701754386}, {T: 1587691000000, V: 16.049122807017543},
+					{T: 1587691100000, V: 15.922807017543859}, {T: 1587691200000, V: 15.63157894736842}, {T: 1587691300000, V: 14.982456140350878}, {T: 1587691400000, V: 14.187259188557551},
+					{T: 1587691500000, V: 13.828070175438594}, {T: 1587691600000, V: 13.971929824561403}, {T: 1587691700000, V: 15.31994329585807}, {T: 1587691800000, V: 14.30877192982456},
+					{T: 1587691900000, V: 13.915789473684212}, {T: 1587692000000, V: 13.312280701754384}, {T: 1587692100000, V: 14.136842105263158}, {T: 1587692200000, V: 14.39298245614035},
+					{T: 1587692300000, V: 15.014035087719297}, {T: 1587692400000, V: 14.112280701754386}, {T: 1587692500000, V: 9.421065148148147}, {T: 1587692600000, V: 6.3736754978451735},
+					{T: 1587692700000, V: 8.19632056099571}, {T: 1587692800000, V: 11.918703026416258}, {T: 1587692900000, V: 13.75813610765101}, {T: 1587693000000, V: 13.087719298245615},
+					{T: 1587693100000, V: 13.466666666666667}, {T: 1587693200000, V: 14.028070175438595}, {T: 1587693300000, V: 14.23859649122807}, {T: 1587693400000, V: 15.407017543859647},
+					{T: 1587693500000, V: 15.915789473684208}, {T: 1587693600000, V: 15.712280701754386},
 				}},
 			}, vec)
 		})
@@ -1194,20 +979,85 @@ func TestQuerierWithDedupUnderstoodByPromQL_Rate(t *testing.T) {
 			testutil.Ok(t, err)
 			testutil.Equals(t, promql.Matrix{
 				{Metric: expectedLset, Points: []promql.Point{
-					{T: 1587691800000, V: 14.464425770308122},
+					{T: 1587691800000, V: 14.464425770308123},
 					{T: 1587692300000, V: 14.763025210084033},
 					{T: 1587692800000, V: 13.143575607888273},
-					{T: 1587693300000, V: 12.930291298224088},
+					{T: 1587693300000, V: 12.930291298224086},
 				}},
 			}, vec)
 		})
 	})
 }
 
+func TestSortReplicaLabel(t *testing.T) {
+	tests := []struct {
+		input       []storepb.Series
+		exp         []storepb.Series
+		dedupLabels map[string]struct{}
+	}{
+		// 0 Single deduplication label.
+		{
+			input: []storepb.Series{
+				{Labels: []labelpb.ZLabel{{Name: "a", Value: "1"}, {Name: "b", Value: "replica-1"}, {Name: "c", Value: "3"}}},
+				{Labels: []labelpb.ZLabel{{Name: "a", Value: "1"}, {Name: "b", Value: "replica-1"}, {Name: "c", Value: "3"}, {Name: "d", Value: "4"}}},
+				{Labels: []labelpb.ZLabel{{Name: "a", Value: "1"}, {Name: "b", Value: "replica-1"}, {Name: "c", Value: "4"}}},
+				{Labels: []labelpb.ZLabel{{Name: "a", Value: "1"}, {Name: "b", Value: "replica-2"}, {Name: "c", Value: "3"}}},
+			},
+			exp: []storepb.Series{
+				{Labels: []labelpb.ZLabel{{Name: "a", Value: "1"}, {Name: "c", Value: "3"}, {Name: "b", Value: "replica-1"}}},
+				{Labels: []labelpb.ZLabel{{Name: "a", Value: "1"}, {Name: "c", Value: "3"}, {Name: "b", Value: "replica-2"}}},
+				{Labels: []labelpb.ZLabel{{Name: "a", Value: "1"}, {Name: "c", Value: "3"}, {Name: "d", Value: "4"}, {Name: "b", Value: "replica-1"}}},
+				{Labels: []labelpb.ZLabel{{Name: "a", Value: "1"}, {Name: "c", Value: "4"}, {Name: "b", Value: "replica-1"}}},
+			},
+			dedupLabels: map[string]struct{}{"b": {}},
+		},
+		// 1 Multi deduplication labels.
+		{
+			input: []storepb.Series{
+				{Labels: []labelpb.ZLabel{{Name: "a", Value: "1"}, {Name: "b", Value: "replica-1"}, {Name: "b1", Value: "replica-1"}, {Name: "c", Value: "3"}}},
+				{Labels: []labelpb.ZLabel{{Name: "a", Value: "1"}, {Name: "b", Value: "replica-1"}, {Name: "b1", Value: "replica-1"}, {Name: "c", Value: "3"}, {Name: "d", Value: "4"}}},
+				{Labels: []labelpb.ZLabel{{Name: "a", Value: "1"}, {Name: "b", Value: "replica-1"}, {Name: "b1", Value: "replica-1"}, {Name: "c", Value: "4"}}},
+				{Labels: []labelpb.ZLabel{{Name: "a", Value: "1"}, {Name: "b", Value: "replica-2"}, {Name: "b1", Value: "replica-2"}, {Name: "c", Value: "3"}}},
+				{Labels: []labelpb.ZLabel{{Name: "a", Value: "1"}, {Name: "b", Value: "replica-2"}, {Name: "c", Value: "3"}}},
+			},
+			exp: []storepb.Series{
+				{Labels: []labelpb.ZLabel{{Name: "a", Value: "1"}, {Name: "c", Value: "3"}, {Name: "b", Value: "replica-1"}, {Name: "b1", Value: "replica-1"}}},
+				{Labels: []labelpb.ZLabel{{Name: "a", Value: "1"}, {Name: "c", Value: "3"}, {Name: "b", Value: "replica-2"}}},
+				{Labels: []labelpb.ZLabel{{Name: "a", Value: "1"}, {Name: "c", Value: "3"}, {Name: "b", Value: "replica-2"}, {Name: "b1", Value: "replica-2"}}},
+				{Labels: []labelpb.ZLabel{{Name: "a", Value: "1"}, {Name: "c", Value: "3"}, {Name: "d", Value: "4"}, {Name: "b", Value: "replica-1"}, {Name: "b1", Value: "replica-1"}}},
+				{Labels: []labelpb.ZLabel{{Name: "a", Value: "1"}, {Name: "c", Value: "4"}, {Name: "b", Value: "replica-1"}, {Name: "b1", Value: "replica-1"}}},
+			},
+			dedupLabels: map[string]struct{}{"b": {}, "b1": {}},
+		},
+		// Pushdown label at the end.
+		{
+			input: []storepb.Series{
+				{Labels: []labelpb.ZLabel{{Name: "a", Value: "1"}, {Name: "b", Value: "replica-1"}, {Name: "c", Value: "3"}}},
+				{Labels: []labelpb.ZLabel{{Name: "a", Value: "1"}, {Name: "b", Value: "replica-1"}, {Name: "c", Value: "3"}, {Name: "d", Value: "4"}}},
+				{Labels: []labelpb.ZLabel{{Name: "a", Value: "1"}, {Name: "b", Value: "replica-1"}, {Name: "c", Value: "4"}, {Name: dedup.PushdownMarker.Name, Value: dedup.PushdownMarker.Value}}},
+				{Labels: []labelpb.ZLabel{{Name: "a", Value: "1"}, {Name: "b", Value: "replica-2"}, {Name: "c", Value: "3"}}},
+			},
+			exp: []storepb.Series{
+				{Labels: []labelpb.ZLabel{{Name: "a", Value: "1"}, {Name: "c", Value: "3"}, {Name: "b", Value: "replica-1"}}},
+				{Labels: []labelpb.ZLabel{{Name: "a", Value: "1"}, {Name: "c", Value: "3"}, {Name: "b", Value: "replica-2"}}},
+				{Labels: []labelpb.ZLabel{{Name: "a", Value: "1"}, {Name: "c", Value: "3"}, {Name: "d", Value: "4"}, {Name: "b", Value: "replica-1"}}},
+				{Labels: []labelpb.ZLabel{{Name: "a", Value: "1"}, {Name: "c", Value: "4"}, {Name: dedup.PushdownMarker.Name, Value: dedup.PushdownMarker.Value}, {Name: "b", Value: "replica-1"}}},
+			},
+			dedupLabels: map[string]struct{}{"b": {}},
+		},
+	}
+	for _, test := range tests {
+		t.Run("", func(t *testing.T) {
+			sortDedupLabels(test.input, test.dedupLabels)
+			testutil.Equals(t, test.exp, test.input)
+		})
+	}
+}
+
 const hackyStaleMarker = float64(-99999999)
 
 func expandSeries(t testing.TB, it chunkenc.Iterator) (res []sample) {
-	for it.Next() != chunkenc.ValNone {
+	for it.Next() {
 		t, v := it.At()
 		// Nan != Nan, so substitute for another value.
 		// This is required for testutil.Equals to work deterministically.
@@ -1224,18 +1074,11 @@ type testStoreServer struct {
 	// This field just exist to pseudo-implement the unused methods of the interface.
 	storepb.StoreServer
 
-	resps                     []*storepb.SeriesResponse
-	respsWithoutReplicaLabels []*storepb.SeriesResponse
+	resps []*storepb.SeriesResponse
 }
 
-func (s *testStoreServer) Series(r *storepb.SeriesRequest, srv storepb.Store_SeriesServer) error {
-	resps := s.resps
-
-	if len(r.WithoutReplicaLabels) > 0 && len(s.respsWithoutReplicaLabels) > 0 {
-		// If `respsWithoutReplicaLabels` is present, we simulate server that supports without replica label feature.
-		resps = s.respsWithoutReplicaLabels
-	}
-	for _, resp := range resps {
+func (s *testStoreServer) Series(_ *storepb.SeriesRequest, srv storepb.Store_SeriesServer) error {
+	for _, resp := range s.resps {
 		err := srv.Send(resp)
 		if err != nil {
 			return err

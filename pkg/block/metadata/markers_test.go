@@ -17,7 +17,7 @@ import (
 	"github.com/thanos-io/objstore"
 	"go.uber.org/goleak"
 
-	"github.com/efficientgo/core/testutil"
+	"github.com/thanos-io/thanos/pkg/testutil"
 )
 
 func TestMain(m *testing.M) {

@@ -11,7 +11,7 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/efficientgo/core/testutil"
+	"github.com/thanos-io/thanos/pkg/testutil"
 )
 
 const msg = "test_error_message"

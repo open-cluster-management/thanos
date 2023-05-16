@@ -19,8 +19,6 @@ import (
 	"github.com/prometheus/common/model"
 	"github.com/weaveworks/common/httpgrpc"
 
-	"github.com/prometheus/prometheus/promql/parser"
-	promqlparser "github.com/prometheus/prometheus/promql/parser"
 	"github.com/thanos-io/thanos/internal/cortex/cortexpb"
 	"github.com/thanos-io/thanos/internal/cortex/querier/queryrange"
 	cortexutil "github.com/thanos-io/thanos/internal/cortex/util"
@@ -40,10 +38,10 @@ func NewThanosQueryInstantCodec(partialResponse bool) *queryInstantCodec {
 	}
 }
 
-// MergeResponse merges multiple responses into a single response. For instant query
-// only vector and matrix responses will be merged because other types of queries
+// MergeResponse merges multiple responses into a single response.
+// For instant query only vector responses will be merged because other types of queries
 // are not shardable like number literal, string literal, scalar, etc.
-func (c queryInstantCodec) MergeResponse(req queryrange.Request, responses ...queryrange.Response) (queryrange.Response, error) {
+func (c queryInstantCodec) MergeResponse(responses ...queryrange.Response) (queryrange.Response, error) {
 	if len(responses) == 0 {
 		return queryrange.NewEmptyPrometheusInstantQueryResponse(), nil
 	} else if len(responses) == 1 {
@@ -54,40 +52,18 @@ func (c queryInstantCodec) MergeResponse(req queryrange.Request, responses ...qu
 	for _, resp := range responses {
 		promResponses = append(promResponses, resp.(*queryrange.PrometheusInstantQueryResponse))
 	}
-	var res queryrange.Response
-	switch promResponses[0].Data.ResultType {
-	case model.ValMatrix.String():
-		res = &queryrange.PrometheusInstantQueryResponse{
-			Status: queryrange.StatusSuccess,
-			Data: queryrange.PrometheusInstantQueryData{
-				ResultType: model.ValMatrix.String(),
-				Result: queryrange.PrometheusInstantQueryResult{
-					Result: &queryrange.PrometheusInstantQueryResult_Matrix{
-						Matrix: matrixMerge(promResponses),
-					},
+	res := &queryrange.PrometheusInstantQueryResponse{
+		Status: queryrange.StatusSuccess,
+		Data: queryrange.PrometheusInstantQueryData{
+			ResultType: model.ValVector.String(),
+			Result: queryrange.PrometheusInstantQueryResult{
+				Result: &queryrange.PrometheusInstantQueryResult_Vector{
+					Vector: vectorMerge(promResponses),
 				},
-				Stats: queryrange.StatsMerge(responses),
 			},
-		}
-	default:
-		v, err := vectorMerge(req, promResponses)
-		if err != nil {
-			return nil, err
-		}
-		res = &queryrange.PrometheusInstantQueryResponse{
-			Status: queryrange.StatusSuccess,
-			Data: queryrange.PrometheusInstantQueryData{
-				ResultType: model.ValVector.String(),
-				Result: queryrange.PrometheusInstantQueryResult{
-					Result: &queryrange.PrometheusInstantQueryResult_Vector{
-						Vector: v,
-					},
-				},
-				Stats: queryrange.StatsMerge(responses),
-			},
-		}
+			Stats: queryrange.StatsMerge(responses),
+		},
 	}
-
 	return res, nil
 }
 
@@ -132,11 +108,6 @@ func (c queryInstantCodec) DecodeRequest(_ context.Context, r *http.Request, for
 	}
 
 	result.ShardInfo, err = parseShardInfo(r.Form, queryv1.ShardInfoParam)
-	if err != nil {
-		return nil, err
-	}
-
-	result.LookbackDelta, err = parseLookbackDelta(r.Form, queryv1.LookbackDeltaParam)
 	if err != nil {
 		return nil, err
 	}
@@ -190,10 +161,6 @@ func (c queryInstantCodec) EncodeRequest(ctx context.Context, r queryrange.Reque
 		params[queryv1.ShardInfoParam] = []string{data}
 	}
 
-	if thanosReq.LookbackDelta > 0 {
-		params[queryv1.LookbackDeltaParam] = []string{encodeDurationMillis(thanosReq.LookbackDelta)}
-	}
-
 	req, err := http.NewRequest(http.MethodPost, thanosReq.Path, bytes.NewBufferString(params.Encode()))
 	if err != nil {
 		return nil, httpgrpc.Errorf(http.StatusBadRequest, "error creating request: %s", err.Error())
@@ -234,7 +201,7 @@ func (c queryInstantCodec) EncodeResponse(ctx context.Context, res queryrange.Re
 	return &resp, nil
 }
 
-func (c queryInstantCodec) DecodeResponse(ctx context.Context, r *http.Response, req queryrange.Request) (queryrange.Response, error) {
+func (c queryInstantCodec) DecodeResponse(ctx context.Context, r *http.Response, _ queryrange.Request) (queryrange.Response, error) {
 	if r.StatusCode/100 != 2 {
 		body, _ := io.ReadAll(r.Body)
 		return nil, httpgrpc.Errorf(r.StatusCode, string(body))
@@ -260,13 +227,8 @@ func (c queryInstantCodec) DecodeResponse(ctx context.Context, r *http.Response,
 	return &resp, nil
 }
 
-func vectorMerge(req queryrange.Request, resps []*queryrange.PrometheusInstantQueryResponse) (*queryrange.Vector, error) {
+func vectorMerge(resps []*queryrange.PrometheusInstantQueryResponse) *queryrange.Vector {
 	output := map[string]*queryrange.Sample{}
-	metrics := []string{} // Used to preserve the order for topk and bottomk.
-	sortPlan, err := sortPlanForQuery(req.GetQuery())
-	if err != nil {
-		return nil, err
-	}
 	for _, resp := range resps {
 		if resp == nil {
 			continue
@@ -284,7 +246,6 @@ func vectorMerge(req queryrange.Request, resps []*queryrange.PrometheusInstantQu
 			metric := cortexpb.FromLabelAdaptersToLabels(sample.Labels).String()
 			if existingSample, ok := output[metric]; !ok {
 				output[metric] = s
-				metrics = append(metrics, metric) // Preserve the order of metric.
 			} else if existingSample.GetSample().TimestampMs < s.GetSample().TimestampMs {
 				// Choose the latest sample if we see overlap.
 				output[metric] = s
@@ -292,144 +253,9 @@ func vectorMerge(req queryrange.Request, resps []*queryrange.PrometheusInstantQu
 		}
 	}
 
-	result := &queryrange.Vector{
-		Samples: make([]*queryrange.Sample, 0, len(output)),
-	}
-
 	if len(output) == 0 {
-		return result, nil
-	}
-
-	if sortPlan == mergeOnly {
-		for _, k := range metrics {
-			result.Samples = append(result.Samples, output[k])
-		}
-		return result, nil
-	}
-
-	type pair struct {
-		metric string
-		s      *queryrange.Sample
-	}
-
-	samples := make([]*pair, 0, len(output))
-	for k, v := range output {
-		samples = append(samples, &pair{
-			metric: k,
-			s:      v,
-		})
-	}
-
-	sort.Slice(samples, func(i, j int) bool {
-		// Order is determined by vector
-		switch sortPlan {
-		case sortByValuesAsc:
-			return samples[i].s.Sample.Value < samples[j].s.Sample.Value
-		case sortByValuesDesc:
-			return samples[i].s.Sample.Value > samples[j].s.Sample.Value
-		}
-		return samples[i].metric < samples[j].metric
-	})
-
-	for _, p := range samples {
-		result.Samples = append(result.Samples, p.s)
-	}
-	return result, nil
-}
-
-type sortPlan int
-
-const (
-	mergeOnly        sortPlan = 0
-	sortByValuesAsc  sortPlan = 1
-	sortByValuesDesc sortPlan = 2
-	sortByLabels     sortPlan = 3
-)
-
-func sortPlanForQuery(q string) (sortPlan, error) {
-	expr, err := promqlparser.ParseExpr(q)
-	if err != nil {
-		return 0, err
-	}
-	// Check if the root expression is topk or bottomk
-	if aggr, ok := expr.(*parser.AggregateExpr); ok {
-		if aggr.Op == promqlparser.TOPK || aggr.Op == promqlparser.BOTTOMK {
-			return mergeOnly, nil
-		}
-	}
-	checkForSort := func(expr promqlparser.Expr) (sortAsc, sortDesc bool) {
-		if n, ok := expr.(*promqlparser.Call); ok {
-			if n.Func != nil {
-				if n.Func.Name == "sort" {
-					sortAsc = true
-				}
-				if n.Func.Name == "sort_desc" {
-					sortDesc = true
-				}
-			}
-		}
-		return sortAsc, sortDesc
-	}
-	// Check the root expression for sort
-	if sortAsc, sortDesc := checkForSort(expr); sortAsc || sortDesc {
-		if sortAsc {
-			return sortByValuesAsc, nil
-		}
-		return sortByValuesDesc, nil
-	}
-
-	// If the root expression is a binary expression, check the LHS and RHS for sort
-	if bin, ok := expr.(*parser.BinaryExpr); ok {
-		if sortAsc, sortDesc := checkForSort(bin.LHS); sortAsc || sortDesc {
-			if sortAsc {
-				return sortByValuesAsc, nil
-			}
-			return sortByValuesDesc, nil
-		}
-		if sortAsc, sortDesc := checkForSort(bin.RHS); sortAsc || sortDesc {
-			if sortAsc {
-				return sortByValuesAsc, nil
-			}
-			return sortByValuesDesc, nil
-		}
-	}
-	return sortByLabels, nil
-}
-
-func matrixMerge(resps []*queryrange.PrometheusInstantQueryResponse) *queryrange.Matrix {
-	output := map[string]*queryrange.SampleStream{}
-	for _, resp := range resps {
-		if resp == nil {
-			continue
-		}
-		// Merge matrix result samples only. Skip other types such as
-		// string, scalar as those are not sharable.
-		if resp.Data.Result.GetMatrix() == nil {
-			continue
-		}
-		for _, stream := range resp.Data.Result.GetMatrix().SampleStreams {
-			metric := cortexpb.FromLabelAdaptersToLabels(stream.Labels).String()
-			existing, ok := output[metric]
-			if !ok {
-				existing = &queryrange.SampleStream{
-					Labels: stream.Labels,
-				}
-			}
-			// We need to make sure we don't repeat samples. This causes some visualizations to be broken in Grafana.
-			// The prometheus API is inclusive of start and end timestamps.
-			if len(existing.Samples) > 0 && len(stream.Samples) > 0 {
-				existingEndTs := existing.Samples[len(existing.Samples)-1].TimestampMs
-				if existingEndTs == stream.Samples[0].TimestampMs {
-					// Typically this the cases where only 1 sample point overlap,
-					// so optimize with simple code.
-					stream.Samples = stream.Samples[1:]
-				} else if existingEndTs > stream.Samples[0].TimestampMs {
-					// Overlap might be big, use heavier algorithm to remove overlap.
-					stream.Samples = queryrange.SliceSamples(stream.Samples, existingEndTs)
-				} // else there is no overlap, yay!
-			}
-			existing.Samples = append(existing.Samples, stream.Samples...)
-			output[metric] = existing
+		return &queryrange.Vector{
+			Samples: make([]*queryrange.Sample, 0),
 		}
 	}
 
@@ -439,12 +265,11 @@ func matrixMerge(resps []*queryrange.PrometheusInstantQueryResponse) *queryrange
 	}
 	sort.Strings(keys)
 
-	result := &queryrange.Matrix{
-		SampleStreams: make([]*queryrange.SampleStream, 0, len(output)),
+	result := &queryrange.Vector{
+		Samples: make([]*queryrange.Sample, 0, len(output)),
 	}
 	for _, key := range keys {
-		result.SampleStreams = append(result.SampleStreams, output[key])
+		result.Samples = append(result.Samples, output[key])
 	}
-
 	return result
 }

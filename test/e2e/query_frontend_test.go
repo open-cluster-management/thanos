@@ -6,7 +6,6 @@ package e2e_test
 import (
 	"context"
 	"reflect"
-	"sort"
 	"testing"
 	"time"
 
@@ -18,11 +17,11 @@ import (
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/model/timestamp"
 
-	"github.com/efficientgo/core/testutil"
 	"github.com/thanos-io/thanos/pkg/block/metadata"
 	"github.com/thanos-io/thanos/pkg/cacheutil"
 	"github.com/thanos-io/thanos/pkg/promclient"
 	"github.com/thanos-io/thanos/pkg/queryfrontend"
+	"github.com/thanos-io/thanos/pkg/testutil"
 	"github.com/thanos-io/thanos/pkg/testutil/e2eutil"
 	"github.com/thanos-io/thanos/test/e2e/e2ethanos"
 )
@@ -595,7 +594,7 @@ func TestRangeQueryShardingWithRandomData(t *testing.T) {
 func TestRangeQueryDynamicHorizontalSharding(t *testing.T) {
 	t.Parallel()
 
-	e, err := e2e.New(e2e.WithName("qfe-dyn-sharding"))
+	e, err := e2e.NewDockerEnvironment("query-frontend")
 	testutil.Ok(t, err)
 	t.Cleanup(e2ethanos.CleanScenario(t, e))
 
@@ -712,13 +711,6 @@ func TestInstantQueryShardingWithRandomData(t *testing.T) {
 		{{Name: labels.MetricName, Value: "http_requests_total"}, {Name: "pod", Value: "5"}, {Name: "handler", Value: "/metrics"}},
 		{{Name: labels.MetricName, Value: "http_requests_total"}, {Name: "pod", Value: "6"}, {Name: "handler", Value: "/"}},
 		{{Name: labels.MetricName, Value: "http_requests_total"}, {Name: "pod", Value: "6"}, {Name: "handler", Value: "/metrics"}},
-	}
-
-	// Ensure labels are ordered.
-	for _, ts := range timeSeries {
-		sort.Slice(ts, func(i, j int) bool {
-			return ts[i].Name < ts[j].Name
-		})
 	}
 
 	startTime := now.Time().Add(-1 * time.Hour)

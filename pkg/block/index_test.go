@@ -16,9 +16,8 @@ import (
 	"github.com/prometheus/prometheus/tsdb/chunks"
 	"github.com/prometheus/prometheus/tsdb/index"
 
-	"github.com/efficientgo/core/testutil"
-
 	"github.com/thanos-io/thanos/pkg/block/metadata"
+	"github.com/thanos-io/thanos/pkg/testutil"
 	"github.com/thanos-io/thanos/pkg/testutil/e2eutil"
 )
 
@@ -77,10 +76,10 @@ func TestRewrite(t *testing.T) {
 	testutil.Ok(t, err)
 
 	for p := ir2.SortedPostings(all); p.Next(); {
-		var builder labels.ScratchBuilder
+		var lset labels.Labels
 		var chks []chunks.Meta
 
-		testutil.Ok(t, ir2.Series(p.At(), &builder, &chks))
+		testutil.Ok(t, ir2.Series(p.At(), &lset, &chks))
 		testutil.Equals(t, 1, len(chks))
 	}
 }
@@ -88,7 +87,7 @@ func TestRewrite(t *testing.T) {
 func TestGatherIndexHealthStatsReturnsOutOfOrderChunksErr(t *testing.T) {
 	blockDir := t.TempDir()
 
-	err := e2eutil.PutOutOfOrderIndex(blockDir, 0, math.MaxInt64)
+	err := testutil.PutOutOfOrderIndex(blockDir, 0, math.MaxInt64)
 	testutil.Ok(t, err)
 
 	stats, err := GatherIndexHealthStats(log.NewLogfmtLogger(os.Stderr), blockDir+"/"+IndexFilename, 0, math.MaxInt64)
