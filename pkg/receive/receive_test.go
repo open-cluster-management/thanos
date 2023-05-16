@@ -6,9 +6,9 @@ package receive
 import (
 	"testing"
 
-	"github.com/thanos-io/thanos/pkg/testutil/custom"
+	"github.com/thanos-io/thanos/pkg/testutil"
 )
 
 func TestMain(m *testing.M) {
-	custom.TolerantVerifyLeakMain(m)
+	testutil.TolerantVerifyLeakMain(m)
 }

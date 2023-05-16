@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"math"
 	"net"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -23,13 +22,12 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
-	"github.com/efficientgo/core/testutil"
 	"github.com/pkg/errors"
-	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/thanos-io/thanos/pkg/component"
 	"github.com/thanos-io/thanos/pkg/info/infopb"
 	"github.com/thanos-io/thanos/pkg/store/labelpb"
 	"github.com/thanos-io/thanos/pkg/store/storepb"
+	"github.com/thanos-io/thanos/pkg/testutil"
 )
 
 var testGRPCOpts = []grpc.DialOption{
@@ -271,55 +269,13 @@ func (e *testEndpoints) CloseOne(addr string) {
 	delete(e.srvs, addr)
 }
 
-func TestTruncateExtLabels(t *testing.T) {
-	const testLength = 5
-
-	for _, tc := range []struct {
-		labelToTruncate string
-		expectedOutput  string
-	}{
-		{
-			labelToTruncate: "{abc}",
-			expectedOutput:  "{abc}",
-		},
-		{
-			labelToTruncate: "{abcd}",
-			expectedOutput:  "{abc}",
-		},
-		{
-			labelToTruncate: "{abcde}",
-			expectedOutput:  "{abc}",
-		},
-		{
-			labelToTruncate: "{abcdef}",
-			expectedOutput:  "{abc}",
-		},
-		{
-			labelToTruncate: "{abcdefghij}",
-			expectedOutput:  "{abc}",
-		},
-	} {
-		t.Run(tc.labelToTruncate, func(t *testing.T) {
-			got := truncateExtLabels(tc.labelToTruncate, testLength)
-			testutil.Equals(t, tc.expectedOutput, got)
-			testutil.Assert(t, len(got) <= testLength)
-		})
-	}
-}
-
 func TestEndpointSetUpdate(t *testing.T) {
-	const metricsMeta = `
-	# HELP thanos_store_nodes_grpc_connections Number of gRPC connection to Store APIs. Opened connection means healthy store APIs available for Querier.
-	# TYPE thanos_store_nodes_grpc_connections gauge
-	`
 	testCases := []struct {
-		name       string
-		endpoints  []testEndpointMeta
-		strict     bool
-		connLabels []string
+		name      string
+		endpoints []testEndpointMeta
+		strict    bool
 
-		expectedEndpoints   int
-		expectedConnMetrics string
+		expectedEndpoints int
 	}{
 		{
 			name: "available endpoint",
@@ -333,13 +289,7 @@ func TestEndpointSetUpdate(t *testing.T) {
 					},
 				},
 			},
-			connLabels: []string{"store_type"},
-
 			expectedEndpoints: 1,
-			expectedConnMetrics: metricsMeta +
-				`
-			thanos_store_nodes_grpc_connections{store_type="sidecar"} 1
-			`,
 		},
 		{
 			name: "unavailable endpoint",
@@ -354,9 +304,7 @@ func TestEndpointSetUpdate(t *testing.T) {
 					},
 				},
 			},
-
-			expectedEndpoints:   0,
-			expectedConnMetrics: "",
+			expectedEndpoints: 0,
 		},
 		{
 			name: "slow endpoint",
@@ -371,9 +319,7 @@ func TestEndpointSetUpdate(t *testing.T) {
 					},
 				},
 			},
-
-			expectedEndpoints:   0,
-			expectedConnMetrics: "",
+			expectedEndpoints: 0,
 		},
 		{
 			name: "strict endpoint",
@@ -388,35 +334,7 @@ func TestEndpointSetUpdate(t *testing.T) {
 				},
 			},
 			strict:            true,
-			connLabels:        []string{"store_type"},
 			expectedEndpoints: 1,
-			expectedConnMetrics: metricsMeta +
-				`
-			thanos_store_nodes_grpc_connections{store_type="sidecar"} 1
-			`,
-		},
-		{
-			name: "long external labels",
-			endpoints: []testEndpointMeta{
-				{
-					InfoResponse: sidecarInfo,
-					// Simulate very long external labels.
-					extlsetFn: func(addr string) []labelpb.ZLabelSet {
-						sLabel := []string{}
-						for i := 0; i < 1000; i++ {
-							sLabel = append(sLabel, "lbl")
-							sLabel = append(sLabel, "val")
-						}
-						return labelpb.ZLabelSetsFromPromLabels(
-							labels.FromStrings(sLabel...),
-						)
-					},
-				},
-			},
-			expectedEndpoints: 1,
-			expectedConnMetrics: metricsMeta + `
-			thanos_store_nodes_grpc_connections{external_labels="{lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val\", lbl=\"val}",store_type="sidecar"} 1
-			`,
 		},
 	}
 
@@ -427,15 +345,12 @@ func TestEndpointSetUpdate(t *testing.T) {
 			defer endpoints.Close()
 
 			discoveredEndpointAddr := endpoints.EndpointAddresses()
-			// Specify only "store_type" to exclude "external_labels".
-			endpointSet := makeEndpointSet(discoveredEndpointAddr, tc.strict, time.Now, tc.connLabels...)
+			endpointSet := makeEndpointSet(discoveredEndpointAddr, tc.strict, time.Now)
 			defer endpointSet.Close()
 
 			endpointSet.Update(context.Background())
 			testutil.Equals(t, tc.expectedEndpoints, len(endpointSet.GetEndpointStatus()))
 			testutil.Equals(t, tc.expectedEndpoints, len(endpointSet.GetStoreClients()))
-
-			testutil.Ok(t, promtestutil.CollectAndCompare(endpointSet.endpointsMetric, strings.NewReader(tc.expectedConnMetrics)))
 		})
 	}
 }
@@ -661,7 +576,7 @@ func TestEndpointSetUpdate_AtomicEndpointAdditions(t *testing.T) {
 	wg.Wait()
 }
 
-func TestEndpointSetUpdate_AvailabilityScenarios(t *testing.T) {
+func TestEndpointSet_Update(t *testing.T) {
 	endpoints, err := startTestEndpoints([]testEndpointMeta{
 		{
 			InfoResponse: sidecarInfo,
@@ -1578,7 +1493,7 @@ func TestUpdateEndpointStateForgetsPreviousErrors(t *testing.T) {
 	testutil.Equals(t, `null`, string(b))
 }
 
-func makeEndpointSet(discoveredEndpointAddr []string, strict bool, now nowFunc, metricLabels ...string) *EndpointSet {
+func makeEndpointSet(discoveredEndpointAddr []string, strict bool, now nowFunc) *EndpointSet {
 	endpointSet := NewEndpointSet(now, nil, nil,
 		func() (specs []*GRPCEndpointSpec) {
 			for _, addr := range discoveredEndpointAddr {
@@ -1586,7 +1501,7 @@ func makeEndpointSet(discoveredEndpointAddr []string, strict bool, now nowFunc, 
 			}
 			return specs
 		},
-		testGRPCOpts, time.Minute, time.Second, metricLabels...)
+		testGRPCOpts, time.Minute, time.Second)
 	return endpointSet
 }
 

@@ -8,7 +8,7 @@ import (
 
 	"github.com/prometheus/prometheus/tsdb/chunkenc"
 
-	"github.com/efficientgo/core/testutil"
+	"github.com/thanos-io/thanos/pkg/testutil"
 )
 
 func TestAggrChunk(t *testing.T) {

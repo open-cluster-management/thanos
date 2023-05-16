@@ -77,18 +77,14 @@ func registerReceive(app *extkingpin.App) {
 		}
 
 		tsdbOpts := &tsdb.Options{
-			MinBlockDuration:               int64(time.Duration(*conf.tsdbMinBlockDuration) / time.Millisecond),
-			MaxBlockDuration:               int64(time.Duration(*conf.tsdbMaxBlockDuration) / time.Millisecond),
-			RetentionDuration:              int64(time.Duration(*conf.retention) / time.Millisecond),
-			OutOfOrderTimeWindow:           int64(time.Duration(*conf.tsdbOutOfOrderTimeWindow) / time.Millisecond),
-			OutOfOrderCapMax:               conf.tsdbOutOfOrderCapMax,
-			NoLockfile:                     conf.noLockFile,
-			WALCompression:                 conf.walCompression,
-			MaxExemplars:                   conf.tsdbMaxExemplars,
-			EnableExemplarStorage:          true,
-			HeadChunksWriteQueueSize:       int(conf.tsdbWriteQueueSize),
-			EnableMemorySnapshotOnShutdown: conf.tsdbMemorySnapshotOnShutdown,
-			EnableNativeHistograms:         conf.tsdbEnableNativeHistograms,
+			MinBlockDuration:         int64(time.Duration(*conf.tsdbMinBlockDuration) / time.Millisecond),
+			MaxBlockDuration:         int64(time.Duration(*conf.tsdbMaxBlockDuration) / time.Millisecond),
+			RetentionDuration:        int64(time.Duration(*conf.retention) / time.Millisecond),
+			NoLockfile:               conf.noLockFile,
+			WALCompression:           conf.walCompression,
+			MaxExemplars:             conf.tsdbMaxExemplars,
+			EnableExemplarStorage:    true,
+			HeadChunksWriteQueueSize: int(conf.tsdbWriteQueueSize),
 		}
 
 		// Are we running in IngestorOnly, RouterOnly or RouterIngestor mode?
@@ -207,11 +203,11 @@ func runReceive(
 		conf.allowOutOfOrderUpload,
 		hashFunc,
 	)
-	writer := receive.NewWriter(log.With(logger, "component", "receive-writer"), dbs, conf.writerInterning)
+	writer := receive.NewWriter(log.With(logger, "component", "receive-writer"), dbs)
 
 	var limitsConfig *receive.RootLimitsConfig
-	if conf.writeLimitsConfig != nil {
-		limitsContentYaml, err := conf.writeLimitsConfig.Content()
+	if conf.limitsConfig != nil {
+		limitsContentYaml, err := conf.limitsConfig.Content()
 		if err != nil {
 			return errors.Wrap(err, "get content of limit configuration")
 		}
@@ -220,7 +216,7 @@ func runReceive(
 			return errors.Wrap(err, "parse limit configuration")
 		}
 	}
-	limiter, err := receive.NewLimiter(conf.writeLimitsConfig, reg, receiveMode, log.With(logger, "component", "receive-limiter"))
+	limiter, err := receive.NewLimiter(conf.limitsConfig, reg, receiveMode, log.With(logger, "component", "receive-limiter"))
 	if err != nil {
 		return errors.Wrap(err, "creating limiter")
 	}
@@ -305,7 +301,7 @@ func runReceive(
 			return errors.Wrap(err, "setup gRPC server")
 		}
 
-		proxy := store.NewProxyStore(
+		mts := store.NewProxyStore(
 			logger,
 			reg,
 			dbs.TSDBLocalClients,
@@ -314,7 +310,6 @@ func runReceive(
 			0,
 			store.LazyRetrieval,
 		)
-		mts := store.NewLimitedStoreServer(store.NewInstrumentedStoreServer(reg, proxy), reg, conf.storeRateLimits)
 		rw := store.ReadWriteTSDBStore{
 			StoreServer:          mts,
 			WriteableStoreServer: webHandler,
@@ -322,15 +317,15 @@ func runReceive(
 
 		infoSrv := info.NewInfoServer(
 			component.Receive.String(),
-			info.WithLabelSetFunc(func() []labelpb.ZLabelSet { return proxy.LabelSet() }),
+			info.WithLabelSetFunc(func() []labelpb.ZLabelSet { return mts.LabelSet() }),
 			info.WithStoreInfoFunc(func() *infopb.StoreInfo {
 				if httpProbe.IsReady() {
-					minTime, maxTime := proxy.TimeRange()
+					minTime, maxTime := mts.TimeRange()
 					return &infopb.StoreInfo{
-						MinTime:                      minTime,
-						MaxTime:                      maxTime,
-						SupportsSharding:             true,
-						SupportsWithoutReplicaLabels: true,
+						MinTime:           minTime,
+						MaxTime:           maxTime,
+						SupportsSharding:  true,
+						SendsSortedSeries: true,
 					}
 				}
 				return nil
@@ -339,7 +334,7 @@ func runReceive(
 		)
 
 		srv := grpcserver.New(logger, receive.NewUnRegisterer(reg), tracer, grpcLogOpts, tagOpts, comp, grpcProbe,
-			grpcserver.WithServer(store.RegisterStoreServer(rw, logger)),
+			grpcserver.WithServer(store.RegisterStoreServer(rw)),
 			grpcserver.WithServer(store.RegisterWritableStoreServer(rw)),
 			grpcserver.WithServer(exemplars.RegisterExemplarsServer(exemplars.NewMultiTSDB(dbs.TSDBExemplars))),
 			grpcserver.WithServer(info.RegisterInfoServer(infoSrv)),
@@ -777,19 +772,14 @@ type receiveConfig struct {
 	forwardTimeout    *model.Duration
 	compression       string
 
-	tsdbMinBlockDuration         *model.Duration
-	tsdbMaxBlockDuration         *model.Duration
-	tsdbOutOfOrderTimeWindow     *model.Duration
-	tsdbOutOfOrderCapMax         int64
-	tsdbAllowOverlappingBlocks   bool
-	tsdbMaxExemplars             int64
-	tsdbWriteQueueSize           int64
-	tsdbMemorySnapshotOnShutdown bool
-	tsdbEnableNativeHistograms   bool
+	tsdbMinBlockDuration       *model.Duration
+	tsdbMaxBlockDuration       *model.Duration
+	tsdbAllowOverlappingBlocks bool
+	tsdbMaxExemplars           int64
+	tsdbWriteQueueSize         int64
 
-	walCompression  bool
-	noLockFile      bool
-	writerInterning bool
+	walCompression bool
+	noLockFile     bool
 
 	hashFunc string
 
@@ -799,14 +789,12 @@ type receiveConfig struct {
 	reqLogConfig      *extflag.PathOrContent
 	relabelConfigPath *extflag.PathOrContent
 
-	writeLimitsConfig *extflag.PathOrContent
-	storeRateLimits   store.SeriesSelectLimits
+	limitsConfig *extflag.PathOrContent
 }
 
 func (rc *receiveConfig) registerFlag(cmd extkingpin.FlagClause) {
 	rc.httpBindAddr, rc.httpGracePeriod, rc.httpTLSConfig = extkingpin.RegisterHTTPFlags(cmd)
 	rc.grpcBindAddr, rc.grpcGracePeriod, rc.grpcCert, rc.grpcKey, rc.grpcClientCA, rc.grpcMaxConnAge = extkingpin.RegisterGRPCFlags(cmd)
-	rc.storeRateLimits.RegisterFlags(cmd)
 
 	cmd.Flag("remote-write.address", "Address to listen on for remote write requests.").
 		Default("0.0.0.0:19291").StringVar(&rc.rwAddress)
@@ -832,14 +820,14 @@ func (rc *receiveConfig) registerFlag(cmd extkingpin.FlagClause) {
 
 	rc.objStoreConfig = extkingpin.RegisterCommonObjStoreFlags(cmd, "", false)
 
-	rc.retention = extkingpin.ModelDuration(cmd.Flag("tsdb.retention", "How long to retain raw samples on local storage. 0d - disables the retention policy (i.e. infinite retention). For more details on how retention is enforced for individual tenants, please refer to the Tenant lifecycle management section in the Receive documentation: https://thanos.io/tip/components/receive.md/#tenant-lifecycle-management").Default("15d"))
+	rc.retention = extkingpin.ModelDuration(cmd.Flag("tsdb.retention", "How long to retain raw samples on local storage. 0d - disables this retention. For more details on how retention is enforced for individual tenants, please refer to the Tenant lifecycle management section in the Receive documentation: https://thanos.io/tip/components/receive.md/#tenant-lifecycle-management").Default("15d"))
 
 	cmd.Flag("receive.hashrings-file", "Path to file that contains the hashring configuration. A watcher is initialized to watch changes and update the hashring dynamically.").PlaceHolder("<path>").StringVar(&rc.hashringsFilePath)
 
 	cmd.Flag("receive.hashrings", "Alternative to 'receive.hashrings-file' flag (lower priority). Content of file that contains the hashring configuration.").PlaceHolder("<content>").StringVar(&rc.hashringsFileContent)
 
 	hashringAlgorithmsHelptext := strings.Join([]string{string(receive.AlgorithmHashmod), string(receive.AlgorithmKetama)}, ", ")
-	cmd.Flag("receive.hashrings-algorithm", "The algorithm used when distributing series in the hashrings. Must be one of "+hashringAlgorithmsHelptext+". Will be overwritten by the tenant-specific algorithm in the hashring config.").
+	cmd.Flag("receive.hashrings-algorithm", "The algorithm used when distributing series in the hashrings. Must be one of "+hashringAlgorithmsHelptext).
 		Default(string(receive.AlgorithmHashmod)).
 		EnumVar(&rc.hashringsAlgorithm, string(receive.AlgorithmHashmod), string(receive.AlgorithmKetama))
 
@@ -871,15 +859,6 @@ func (rc *receiveConfig) registerFlag(cmd extkingpin.FlagClause) {
 
 	rc.tsdbMaxBlockDuration = extkingpin.ModelDuration(cmd.Flag("tsdb.max-block-duration", "Max duration for local TSDB blocks").Default("2h").Hidden())
 
-	rc.tsdbOutOfOrderTimeWindow = extkingpin.ModelDuration(cmd.Flag("tsdb.out-of-order.time-window",
-		"[EXPERIMENTAL] Configures the allowed time window for ingestion of out-of-order samples. Disabled (0s) by default"+
-			"Please note if you enable this option and you use compactor, make sure you have the --enable-vertical-compaction flag enabled, otherwise you might risk compactor halt.",
-	).Default("0s").Hidden())
-
-	cmd.Flag("tsdb.out-of-order.cap-max",
-		"[EXPERIMENTAL] Configures the maximum capacity for out-of-order chunks (in samples). If set to <=0, default value 32 is assumed.",
-	).Default("0").Hidden().Int64Var(&rc.tsdbOutOfOrderCapMax)
-
 	cmd.Flag("tsdb.allow-overlapping-blocks", "Allow overlapping blocks, which in turn enables vertical compaction and vertical query merge. Does not do anything, enabled all the time.").Default("false").BoolVar(&rc.tsdbAllowOverlappingBlocks)
 
 	cmd.Flag("tsdb.wal-compression", "Compress the tsdb WAL.").Default("true").BoolVar(&rc.walCompression)
@@ -897,18 +876,6 @@ func (rc *receiveConfig) registerFlag(cmd extkingpin.FlagClause) {
 			"A queue size of zero (default) disables this feature entirely.").
 		Default("0").Hidden().Int64Var(&rc.tsdbWriteQueueSize)
 
-	cmd.Flag("tsdb.memory-snapshot-on-shutdown",
-		"[EXPERIMENTAL] Enables feature to snapshot in-memory chunks on shutdown for faster restarts.").
-		Default("false").Hidden().BoolVar(&rc.tsdbMemorySnapshotOnShutdown)
-
-	cmd.Flag("tsdb.enable-native-histograms",
-		"[EXPERIMENTAL] Enables the ingestion of native histograms.").
-		Default("false").Hidden().BoolVar(&rc.tsdbEnableNativeHistograms)
-
-	cmd.Flag("writer.intern",
-		"[EXPERIMENTAL] Enables string interning in receive writer, for more optimized memory usage.").
-		Default("false").Hidden().BoolVar(&rc.writerInterning)
-
 	cmd.Flag("hash-func", "Specify which hash function to use when calculating the hashes of produced files. If no function has been specified, it does not happen. This permits avoiding downloading some files twice albeit at some performance cost. Possible values are: \"\", \"SHA256\".").
 		Default("").EnumVar(&rc.hashFunc, "SHA256", "")
 
@@ -922,7 +889,7 @@ func (rc *receiveConfig) registerFlag(cmd extkingpin.FlagClause) {
 
 	rc.reqLogConfig = extkingpin.RegisterRequestLoggingFlags(cmd)
 
-	rc.writeLimitsConfig = extflag.RegisterPathOrContent(cmd, "receive.limits-config", "YAML file that contains limit configuration.", extflag.WithEnvSubstitution(), extflag.WithHidden())
+	rc.limitsConfig = extflag.RegisterPathOrContent(cmd, "receive.limits-config", "YAML file that contains limit configuration.", extflag.WithEnvSubstitution(), extflag.WithHidden())
 }
 
 // determineMode returns the ReceiverMode that this receiver is configured to run in.

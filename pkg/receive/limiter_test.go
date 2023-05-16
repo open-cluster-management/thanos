@@ -12,7 +12,7 @@ import (
 
 	"github.com/thanos-io/thanos/pkg/extkingpin"
 
-	"github.com/efficientgo/core/testutil"
+	"github.com/efficientgo/tools/core/pkg/testutil"
 	"github.com/go-kit/log"
 )
 

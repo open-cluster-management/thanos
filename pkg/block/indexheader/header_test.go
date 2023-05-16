@@ -21,9 +21,9 @@ import (
 	"github.com/thanos-io/objstore"
 	"github.com/thanos-io/objstore/providers/filesystem"
 
-	"github.com/efficientgo/core/testutil"
 	"github.com/thanos-io/thanos/pkg/block"
 	"github.com/thanos-io/thanos/pkg/block/metadata"
+	"github.com/thanos-io/thanos/pkg/testutil"
 	"github.com/thanos-io/thanos/pkg/testutil/e2eutil"
 )
 
@@ -97,8 +97,7 @@ func TestReaders(t *testing.T) {
 
 			t.Run("binary reader", func(t *testing.T) {
 				fn := filepath.Join(tmpDir, id.String(), block.IndexHeaderFilename)
-				_, err := WriteBinary(ctx, bkt, id, fn)
-				testutil.Ok(t, err)
+				testutil.Ok(t, WriteBinary(ctx, bkt, id, fn))
 
 				br, err := NewBinaryReader(ctx, log.NewNopLogger(), nil, tmpDir, id, 3)
 				testutil.Ok(t, err)
@@ -171,8 +170,7 @@ func TestReaders(t *testing.T) {
 
 			t.Run("lazy binary reader", func(t *testing.T) {
 				fn := filepath.Join(tmpDir, id.String(), block.IndexHeaderFilename)
-				_, err := WriteBinary(ctx, bkt, id, fn)
-				testutil.Ok(t, err)
+				testutil.Ok(t, WriteBinary(ctx, bkt, id, fn))
 
 				br, err := NewLazyBinaryReader(ctx, log.NewNopLogger(), nil, tmpDir, id, 3, NewLazyBinaryReaderMetrics(nil), nil)
 				testutil.Ok(t, err)
@@ -342,8 +340,7 @@ func BenchmarkBinaryWrite(t *testing.B) {
 
 	t.ResetTimer()
 	for i := 0; i < t.N; i++ {
-		_, err := WriteBinary(ctx, bkt, m.ULID, fn)
-		testutil.Ok(t, err)
+		testutil.Ok(t, WriteBinary(ctx, bkt, m.ULID, fn))
 	}
 }
 
@@ -356,8 +353,7 @@ func BenchmarkBinaryReader(t *testing.B) {
 
 	m := prepareIndexV2Block(t, tmpDir, bkt)
 	fn := filepath.Join(tmpDir, m.ULID.String(), block.IndexHeaderFilename)
-	_, err = WriteBinary(ctx, bkt, m.ULID, fn)
-	testutil.Ok(t, err)
+	testutil.Ok(t, WriteBinary(ctx, bkt, m.ULID, fn))
 
 	t.ResetTimer()
 	for i := 0; i < t.N; i++ {

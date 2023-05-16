@@ -12,9 +12,6 @@ import (
 
 	"github.com/cespare/xxhash"
 
-	"github.com/go-kit/log"
-	"github.com/go-kit/log/level"
-
 	"github.com/pkg/errors"
 
 	"github.com/thanos-io/thanos/pkg/store/labelpb"
@@ -239,14 +236,19 @@ func newMultiHashring(algorithm HashringAlgorithm, replicationFactor uint64, cfg
 		cache: make(map[string]Hashring),
 	}
 
-	for _, h := range cfg {
-		var hashring Hashring
-		if h.Algorithm != "" {
-			hashring = newHashring(h.Algorithm, h.Endpoints, replicationFactor, h.Hashring, h.Tenants)
-		} else {
-			hashring = newHashring(algorithm, h.Endpoints, replicationFactor, h.Hashring, h.Tenants)
+	newHashring := func(endpoints []string) Hashring {
+		switch algorithm {
+		case AlgorithmHashmod:
+			return simpleHashring(endpoints)
+		case AlgorithmKetama:
+			return newKetamaHashring(endpoints, SectionsPerNode, replicationFactor)
+		default:
+			return simpleHashring(endpoints)
 		}
-		m.hashrings = append(m.hashrings, hashring)
+	}
+
+	for _, h := range cfg {
+		m.hashrings = append(m.hashrings, newHashring(h.Endpoints))
 		var t map[string]struct{}
 		if len(h.Tenants) != 0 {
 			t = make(map[string]struct{})
@@ -296,19 +298,4 @@ func HashringFromConfig(algorithm HashringAlgorithm, replicationFactor uint64, c
 	}
 
 	return newMultiHashring(algorithm, replicationFactor, config), err
-}
-
-func newHashring(algorithm HashringAlgorithm, endpoints []string, replicationFactor uint64, hashring string, tenants []string) Hashring {
-	switch algorithm {
-	case AlgorithmHashmod:
-		return simpleHashring(endpoints)
-	case AlgorithmKetama:
-		return newKetamaHashring(endpoints, SectionsPerNode, replicationFactor)
-	default:
-		l := log.NewNopLogger()
-		level.Warn(l).Log("msg", "Unrecognizable hashring algorithm. Fall back to hashmod algorithm.",
-			"hashring", hashring,
-			"tenants", tenants)
-		return simpleHashring(endpoints)
-	}
 }

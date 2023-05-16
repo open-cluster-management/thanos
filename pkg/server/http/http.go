@@ -75,14 +75,7 @@ func (s *Server) ListenAndServe() error {
 	if err != nil {
 		return errors.Wrap(err, "server could not be started")
 	}
-
-	flags := &toolkit_web.FlagConfig{
-		WebListenAddresses: &([]string{s.opts.listen}),
-		WebSystemdSocket:   ofBool(false),
-		WebConfigFile:      &s.opts.tlsConfigPath,
-	}
-
-	return errors.Wrap(toolkit_web.ListenAndServe(s.srv, flags, s.logger), "serve HTTP and metrics")
+	return errors.Wrap(toolkit_web.ListenAndServe(s.srv, s.opts.tlsConfigPath, s.logger), "serve HTTP and metrics")
 }
 
 // Shutdown gracefully shuts down the server by waiting,
@@ -137,9 +130,4 @@ func registerProbes(mux *http.ServeMux, p *prober.HTTPProbe, logger log.Logger) 
 		mux.Handle("/-/healthy", p.HealthyHandler(logger))
 		mux.Handle("/-/ready", p.ReadyHandler(logger))
 	}
-}
-
-// Helper for exporter toolkit FlagConfig.
-func ofBool(i bool) *bool {
-	return &i
 }

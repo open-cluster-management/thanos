@@ -30,12 +30,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/efficientgo/core/testutil"
 	"github.com/go-kit/log"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/common/route"
-	"github.com/prometheus/prometheus/model/histogram"
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/model/timestamp"
 	"github.com/prometheus/prometheus/promql"
@@ -43,7 +41,6 @@ import (
 	"github.com/prometheus/prometheus/rules"
 	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/tsdb"
-	"github.com/prometheus/prometheus/tsdb/chunkenc"
 	"github.com/prometheus/prometheus/tsdb/tsdbutil"
 	promgate "github.com/prometheus/prometheus/util/gate"
 	"github.com/prometheus/prometheus/util/stats"
@@ -56,14 +53,13 @@ import (
 	"github.com/thanos-io/thanos/pkg/store"
 	"github.com/thanos-io/thanos/pkg/store/labelpb"
 	"github.com/thanos-io/thanos/pkg/store/storepb"
-	storetestutil "github.com/thanos-io/thanos/pkg/store/storepb/testutil"
-	"github.com/thanos-io/thanos/pkg/testutil/custom"
+	"github.com/thanos-io/thanos/pkg/testutil"
 	"github.com/thanos-io/thanos/pkg/testutil/e2eutil"
 	"github.com/thanos-io/thanos/pkg/testutil/testpromcompatibility"
 )
 
 func TestMain(m *testing.M) {
-	custom.TolerantVerifyLeakMain(m)
+	testutil.TolerantVerifyLeakMain(m)
 }
 
 type endpointTestCase struct {
@@ -193,10 +189,10 @@ func TestQueryEndpoints(t *testing.T) {
 		baseAPI: &baseAPI.BaseAPI{
 			Now: func() time.Time { return now },
 		},
-		queryableCreate:       query.NewQueryableCreator(nil, nil, newProxyStoreWithTSDBStore(db), 2, timeout),
+		queryableCreate:       query.NewQueryableCreator(nil, nil, store.NewTSDBStore(nil, db, component.Query, nil), 2, timeout),
 		queryEngine:           qe,
 		lookbackDeltaCreate:   func(m int64) time.Duration { return time.Duration(0) },
-		gate:                  gate.New(nil, 4, gate.Queries),
+		gate:                  gate.New(nil, 4),
 		defaultRangeQueryStep: time.Second,
 		queryRangeHist: promauto.With(prometheus.NewRegistry()).NewHistogram(prometheus.HistogramOpts{
 			Name: "query_range_hist",
@@ -643,24 +639,6 @@ func TestQueryEndpoints(t *testing.T) {
 	}
 }
 
-func newProxyStoreWithTSDBStore(db store.TSDBReader) *store.ProxyStore {
-	c := &storetestutil.TestClient{
-		Name:        "1",
-		StoreClient: storepb.ServerAsClient(store.NewTSDBStore(nil, db, component.Query, nil), 0),
-		MinTime:     math.MinInt64, MaxTime: math.MaxInt64,
-	}
-
-	return store.NewProxyStore(
-		nil,
-		nil,
-		func() []store.Client { return []store.Client{c} },
-		component.Query,
-		nil,
-		0,
-		store.EagerRetrieval,
-	)
-}
-
 func TestMetadataEndpoints(t *testing.T) {
 	var old = []labels.Labels{
 		{
@@ -752,10 +730,10 @@ func TestMetadataEndpoints(t *testing.T) {
 		baseAPI: &baseAPI.BaseAPI{
 			Now: func() time.Time { return now },
 		},
-		queryableCreate:     query.NewQueryableCreator(nil, nil, newProxyStoreWithTSDBStore(db), 2, timeout),
+		queryableCreate:     query.NewQueryableCreator(nil, nil, store.NewTSDBStore(nil, db, component.Query, nil), 2, timeout),
 		queryEngine:         qe,
 		lookbackDeltaCreate: func(m int64) time.Duration { return time.Duration(0) },
-		gate:                gate.New(nil, 4, gate.Queries),
+		gate:                gate.New(nil, 4),
 		queryRangeHist: promauto.With(prometheus.NewRegistry()).NewHistogram(prometheus.HistogramOpts{
 			Name: "query_range_hist",
 		}),
@@ -765,10 +743,10 @@ func TestMetadataEndpoints(t *testing.T) {
 		baseAPI: &baseAPI.BaseAPI{
 			Now: func() time.Time { return now },
 		},
-		queryableCreate:          query.NewQueryableCreator(nil, nil, newProxyStoreWithTSDBStore(db), 2, timeout),
+		queryableCreate:          query.NewQueryableCreator(nil, nil, store.NewTSDBStore(nil, db, component.Query, nil), 2, timeout),
 		queryEngine:              qe,
 		lookbackDeltaCreate:      func(m int64) time.Duration { return time.Duration(0) },
-		gate:                     gate.New(nil, 4, gate.Queries),
+		gate:                     gate.New(nil, 4),
 		defaultMetadataTimeRange: apiLookbackDelta,
 		queryRangeHist: promauto.With(prometheus.NewRegistry()).NewHistogram(prometheus.HistogramOpts{
 			Name: "query_range_hist",
@@ -1480,7 +1458,7 @@ func TestParseDownsamplingParamMillis(t *testing.T) {
 	for i, test := range tests {
 		api := QueryAPI{
 			enableAutodownsampling: test.enableAutodownsampling,
-			gate:                   gate.New(nil, 4, gate.Queries),
+			gate:                   gate.New(nil, 4),
 			queryRangeHist: promauto.With(prometheus.NewRegistry()).NewHistogram(prometheus.HistogramOpts{
 				Name: "query_range_hist",
 			}),
@@ -1876,17 +1854,4 @@ func (s sample) T() int64 {
 
 func (s sample) V() float64 {
 	return s.v
-}
-
-// TODO(rabenhorst): Needs to be implemented for native histogram support.
-func (s sample) H() *histogram.Histogram {
-	panic("not implemented")
-}
-
-func (s sample) FH() *histogram.FloatHistogram {
-	panic("not implemented")
-}
-
-func (s sample) Type() chunkenc.ValueType {
-	return chunkenc.ValFloat
 }

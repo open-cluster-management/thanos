@@ -12,7 +12,6 @@ import (
 
 	"github.com/go-kit/log"
 	"github.com/pkg/errors"
-	"github.com/prometheus/prometheus/model/histogram"
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/model/value"
 	"github.com/prometheus/prometheus/storage"
@@ -24,10 +23,9 @@ import (
 	"github.com/prometheus/prometheus/tsdb/tsdbutil"
 	"go.uber.org/goleak"
 
-	"github.com/efficientgo/core/testutil"
-
 	"github.com/thanos-io/thanos/pkg/block"
 	"github.com/thanos-io/thanos/pkg/block/metadata"
+	"github.com/thanos-io/thanos/pkg/testutil"
 )
 
 func TestMain(m *testing.M) {
@@ -50,7 +48,7 @@ func TestDownsampleCounterBoundaryReset(t *testing.T) {
 			testutil.Ok(t, err)
 
 			iter := chk.Iterator(nil)
-			for iter.Next() != chunkenc.ValNone {
+			for iter.Next() {
 				t, v := iter.At()
 				res = append(res, sample{t, v})
 			}
@@ -67,7 +65,7 @@ func TestDownsampleCounterBoundaryReset(t *testing.T) {
 		}
 
 		citer := NewApplyCounterResetsIterator(iters...)
-		for citer.Next() != chunkenc.ValNone {
+		for citer.Next() {
 			t, v := citer.At()
 			res = append(res, sample{t: t, v: v})
 		}
@@ -476,12 +474,9 @@ func TestDownsample(t *testing.T) {
 			testutil.Ok(t, pall.Err())
 			testutil.Equals(t, 1, len(series))
 
-			var builder labels.ScratchBuilder
 			var lset labels.Labels
 			var chks []chunks.Meta
-			testutil.Ok(t, indexr.Series(series[0], &builder, &chks))
-
-			lset = builder.Labels()
+			testutil.Ok(t, indexr.Series(series[0], &lset, &chks))
 			testutil.Equals(t, labels.FromStrings("__name__", "a"), lset)
 
 			var got []map[AggrType][]sample
@@ -538,23 +533,21 @@ func TestDownsampleAggrAndEmptyXORChunks(t *testing.T) {
 }
 
 func TestDownsampleAggrAndNonEmptyXORChunks(t *testing.T) {
-
 	logger := log.NewLogfmtLogger(os.Stderr)
 	dir := t.TempDir()
+
 	ser := &series{lset: labels.FromStrings("__name__", "a")}
 	aggr := map[AggrType][]sample{
-		AggrCount:   {{t: 1587690299999, v: 20}, {t: 1587690599999, v: 20}, {t: 1587690899999, v: 20}},
-		AggrSum:     {{t: 1587690299999, v: 9.276972e+06}, {t: 1587690599999, v: 9.359861e+06}, {t: 1587693590791, v: 255746}},
-		AggrMin:     {{t: 1587690299999, v: 461968}, {t: 1587690599999, v: 466070}, {t: 1587690899999, v: 470131}, {t: 1587691199999, v: 474913}},
-		AggrMax:     {{t: 1587690299999, v: 465870}, {t: 1587690599999, v: 469951}, {t: 1587690899999, v: 474726}},
-		AggrCounter: {{t: 1587690005791, v: 461968}, {t: 1587690299999, v: 465870}, {t: 1587690599999, v: 469951}},
+		AggrCount:   {{t: 1587690299999, v: 20}, {t: 1587690599999, v: 20}, {t: 1587690899999, v: 20}, {t: 1587691199999, v: 20}, {t: 1587691499999, v: 20}, {t: 1587691799999, v: 20}, {t: 1587692099999, v: 20}, {t: 1587692399999, v: 20}, {t: 1587692699999, v: 16}, {t: 1587692999999, v: 20}, {t: 1587693299999, v: 20}, {t: 1587693590791, v: 20}},
+		AggrSum:     {{t: 1587690299999, v: 9.276972e+06}, {t: 1587690599999, v: 9.359861e+06}, {t: 1587690899999, v: 9.447457e+06}, {t: 1587691199999, v: 9.542732e+06}, {t: 1587691499999, v: 9.630379e+06}, {t: 1587691799999, v: 9.715631e+06}, {t: 1587692099999, v: 9.799808e+06}, {t: 1587692399999, v: 9.888117e+06}, {t: 1587692699999, v: 2.98928e+06}, {t: 1587692999999, v: 81592}, {t: 1587693299999, v: 163711}, {t: 1587693590791, v: 255746}},
+		AggrMin:     {{t: 1587690299999, v: 461968}, {t: 1587690599999, v: 466070}, {t: 1587690899999, v: 470131}, {t: 1587691199999, v: 474913}, {t: 1587691499999, v: 479625}, {t: 1587691799999, v: 483709}, {t: 1587692099999, v: 488036}, {t: 1587692399999, v: 492223}, {t: 1587692699999, v: 75}, {t: 1587692999999, v: 2261}, {t: 1587693299999, v: 6210}, {t: 1587693590791, v: 10464}},
+		AggrMax:     {{t: 1587690299999, v: 465870}, {t: 1587690599999, v: 469951}, {t: 1587690899999, v: 474726}, {t: 1587691199999, v: 479368}, {t: 1587691499999, v: 483566}, {t: 1587691799999, v: 487787}, {t: 1587692099999, v: 492065}, {t: 1587692399999, v: 496245}, {t: 1587692699999, v: 496544}, {t: 1587692999999, v: 6010}, {t: 1587693299999, v: 10242}, {t: 1587693590791, v: 14956}},
+		AggrCounter: {{t: 1587690005791, v: 461968}, {t: 1587690299999, v: 465870}, {t: 1587690599999, v: 469951}, {t: 1587690899999, v: 474726}, {t: 1587691199999, v: 479368}, {t: 1587691499999, v: 483566}, {t: 1587691799999, v: 487787}, {t: 1587692099999, v: 492065}, {t: 1587692399999, v: 496245}, {t: 1587692699999, v: 498647}, {t: 1587692999999, v: 502554}, {t: 1587693299999, v: 506786}, {t: 1587693590791, v: 511500}, {t: 1587693590791, v: 14956}},
 	}
 	raw := chunkenc.NewXORChunk()
 	app, err := raw.Appender()
 	testutil.Ok(t, err)
-
 	app.Append(1587690005794, 42.5)
-
 	ser.chunks = append(ser.chunks, encodeTestAggrSeries(aggr), chunks.Meta{
 		MinTime: math.MaxInt64,
 		MaxTime: math.MinInt64,
@@ -568,64 +561,7 @@ func TestDownsampleAggrAndNonEmptyXORChunks(t *testing.T) {
 	fakeMeta.Thanos.Downsample.Resolution = 300_000
 	id, err := Downsample(logger, fakeMeta, mb, dir, 3_600_000)
 	_ = id
-	testutil.Ok(t, err)
-
-	expected := []map[AggrType][]sample{
-		{
-			AggrCount:   {{1587690005794, 20}, {1587690005794, 20}, {1587690005794, 21}},
-			AggrSum:     {{1587690005794, 9.276972e+06}, {1587690005794, 9.359861e+06}, {1587690005794, 255788.5}},
-			AggrMin:     {{1587690005794, 461968}, {1587690005794, 466070}, {1587690005794, 470131}, {1587690005794, 42.5}},
-			AggrMax:     {{1587690005794, 465870}, {1587690005794, 469951}, {1587690005794, 474726}},
-			AggrCounter: {{1587690005791, 461968}, {1587690599999, 469951}, {1587690599999, 469951}},
-		},
-	}
-
-	_, err = metadata.ReadFromDir(filepath.Join(dir, id.String()))
-	testutil.Ok(t, err)
-
-	indexr, err := index.NewFileReader(filepath.Join(dir, id.String(), block.IndexFilename))
-	testutil.Ok(t, err)
-	defer func() { testutil.Ok(t, indexr.Close()) }()
-
-	chunkr, err := chunks.NewDirReader(filepath.Join(dir, id.String(), block.ChunksDirname), NewPool())
-	testutil.Ok(t, err)
-	defer func() { testutil.Ok(t, chunkr.Close()) }()
-
-	pall, err := indexr.Postings(index.AllPostingsKey())
-	testutil.Ok(t, err)
-
-	var series []storage.SeriesRef
-	for pall.Next() {
-		series = append(series, pall.At())
-	}
-	testutil.Ok(t, pall.Err())
-	testutil.Equals(t, 1, len(series))
-
-	var builder labels.ScratchBuilder
-	var chks []chunks.Meta
-	testutil.Ok(t, indexr.Series(series[0], &builder, &chks))
-
-	var got []map[AggrType][]sample
-	for _, c := range chks {
-		chk, err := chunkr.Chunk(c)
-		testutil.Ok(t, err)
-
-		m := map[AggrType][]sample{}
-		for _, at := range []AggrType{AggrCount, AggrSum, AggrMin, AggrMax, AggrCounter} {
-			c, err := chk.(*AggrChunk).Get(at)
-			if err == ErrAggrNotExist {
-				continue
-			}
-			testutil.Ok(t, err)
-
-			buf := m[at]
-			testutil.Ok(t, expandChunkIterator(c.Iterator(nil), &buf))
-			m[at] = buf
-		}
-		got = append(got, m)
-	}
-	testutil.Equals(t, expected, got)
-
+	testutil.NotOk(t, err)
 }
 
 func chunksToSeriesIteratable(t *testing.T, inRaw [][]sample, inAggr []map[AggrType][]sample) *series {
@@ -682,7 +618,7 @@ func TestAverageChunkIterator(t *testing.T) {
 	x := NewAverageChunkIterator(newSampleIterator(cnt), newSampleIterator(sum))
 
 	var res []sample
-	for x.Next() != chunkenc.ValNone {
+	for x.Next() {
 		t, v := x.At()
 		res = append(res, sample{t, v})
 	}
@@ -783,7 +719,7 @@ func TestApplyCounterResetsIterator(t *testing.T) {
 			x := NewApplyCounterResetsIterator(its...)
 
 			var res []sample
-			for x.Next() != chunkenc.ValNone {
+			for x.Next() {
 				t, v := x.At()
 				res = append(res, sample{t, v})
 			}
@@ -816,14 +752,15 @@ func TestCounterSeriesIteratorSeek(t *testing.T) {
 	var res []sample
 	x := NewApplyCounterResetsIterator(its...)
 
-	valueType := x.Seek(150)
-	testutil.Equals(t, chunkenc.ValFloat, valueType, "Seek should return float value type")
+	ok := x.Seek(150)
+	testutil.Assert(t, ok, "Seek should return true")
 	testutil.Ok(t, x.Err())
 	for {
 		ts, v := x.At()
 		res = append(res, sample{ts, v})
 
-		if x.Next() == chunkenc.ValNone {
+		ok = x.Next()
+		if !ok {
 			break
 		}
 	}
@@ -842,8 +779,8 @@ func TestCounterSeriesIteratorSeekExtendTs(t *testing.T) {
 
 	x := NewApplyCounterResetsIterator(its...)
 
-	valueType := x.Seek(500)
-	testutil.Equals(t, chunkenc.ValNone, valueType, "Seek should return none value type")
+	ok := x.Seek(500)
+	testutil.Assert(t, !ok, "Seek should return false")
 }
 
 func TestCounterSeriesIteratorSeekAfterNext(t *testing.T) {
@@ -864,14 +801,15 @@ func TestCounterSeriesIteratorSeekAfterNext(t *testing.T) {
 
 	x.Next()
 
-	valueType := x.Seek(50)
-	testutil.Equals(t, chunkenc.ValFloat, valueType, "Seek should return float value type")
+	ok := x.Seek(50)
+	testutil.Assert(t, ok, "Seek should return true")
 	testutil.Ok(t, x.Err())
 	for {
 		ts, v := x.At()
 		res = append(res, sample{ts, v})
 
-		if x.Next() == chunkenc.ValNone {
+		ok = x.Next()
+		if !ok {
 			break
 		}
 	}
@@ -923,19 +861,6 @@ func (s testSample) V() float64 {
 	return s.v
 }
 
-// TODO(rabenhorst): Needs to be implemented for native histogram support.
-func (s testSample) H() *histogram.Histogram {
-	panic("not implemented")
-}
-
-func (s testSample) FH() *histogram.FloatHistogram {
-	panic("not implemented")
-}
-
-func (s testSample) Type() chunkenc.ValueType {
-	panic("not implemented")
-}
-
 type sampleIterator struct {
 	l []sample
 	i int
@@ -949,34 +874,20 @@ func (it *sampleIterator) Err() error {
 	return nil
 }
 
-// TODO(rabenhorst): Native histogram support needs to be added.
-func (it *sampleIterator) Next() chunkenc.ValueType {
+func (it *sampleIterator) Next() bool {
 	if it.i >= len(it.l)-1 {
-		return chunkenc.ValNone
+		return false
 	}
 	it.i++
-	return chunkenc.ValFloat
+	return true
 }
 
-func (it *sampleIterator) Seek(int64) chunkenc.ValueType {
+func (it *sampleIterator) Seek(int64) bool {
 	panic("unexpected")
 }
 
 func (it *sampleIterator) At() (t int64, v float64) {
 	return it.l[it.i].t, it.l[it.i].v
-}
-
-// TODO(rabenhorst): Needs to be implemented for native histogram support.
-func (it *sampleIterator) AtHistogram() (int64, *histogram.Histogram) {
-	panic("not implemented")
-}
-
-func (it *sampleIterator) AtFloatHistogram() (int64, *histogram.FloatHistogram) {
-	panic("not implemented")
-}
-
-func (it *sampleIterator) AtT() int64 {
-	return it.l[it.i].t
 }
 
 // memBlock is an in-memory block that implements a subset of the tsdb.BlockReader interface
@@ -1059,14 +970,13 @@ func (b *memBlock) Postings(name string, val ...string) (index.Postings, error) 
 	return index.NewListPostings(b.postings), nil
 }
 
-func (b *memBlock) Series(id storage.SeriesRef, builder *labels.ScratchBuilder, chks *[]chunks.Meta) error {
+func (b *memBlock) Series(id storage.SeriesRef, lset *labels.Labels, chks *[]chunks.Meta) error {
 	if int(id) >= len(b.series) {
 		return errors.Wrapf(storage.ErrNotFound, "series with ID %d does not exist", id)
 	}
 	s := b.series[id]
 
-	builder.Reset()
-	builder.Assign(s.lset)
+	*lset = append((*lset)[:0], s.lset...)
 	*chks = append((*chks)[:0], s.chunks...)
 
 	return nil

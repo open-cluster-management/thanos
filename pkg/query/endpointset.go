@@ -38,29 +38,15 @@ const (
 	noMetadataEndpointMessage = "cannot obtain metadata: neither info nor store client found"
 )
 
-type queryConnMetricLabel string
-
-const (
-	ExternalLabels queryConnMetricLabel = "external_labels"
-	StoreType      queryConnMetricLabel = "store_type"
-)
-
 type GRPCEndpointSpec struct {
 	addr           string
 	isStrictStatic bool
-	dialOpts       []grpc.DialOption
 }
-
-const externalLabelLimit = 1000
 
 // NewGRPCEndpointSpec creates gRPC endpoint spec.
 // It uses InfoAPI to get Metadata.
-func NewGRPCEndpointSpec(addr string, isStrictStatic bool, dialOpts ...grpc.DialOption) *GRPCEndpointSpec {
-	return &GRPCEndpointSpec{
-		addr:           addr,
-		isStrictStatic: isStrictStatic,
-		dialOpts:       dialOpts,
-	}
+func NewGRPCEndpointSpec(addr string, isStrictStatic bool) *GRPCEndpointSpec {
+	return &GRPCEndpointSpec{addr: addr, isStrictStatic: isStrictStatic}
 }
 
 func (es *GRPCEndpointSpec) Addr() string {
@@ -190,48 +176,35 @@ type EndpointStatus struct {
 
 // endpointSetNodeCollector is a metric collector reporting the number of available storeAPIs for Querier.
 // A Collector is required as we want atomic updates for all 'thanos_store_nodes_grpc_connections' series.
-// TODO(hitanshu-mehta) Currently,only collecting metrics of storeEndpoints. Make this struct generic.
+// TODO(hitanshu-mehta) Currently,only collecting metrics of storeAPI. Make this struct generic.
 type endpointSetNodeCollector struct {
 	mtx             sync.Mutex
 	storeNodes      map[component.Component]map[string]int
 	storePerExtLset map[string]int
 
 	connectionsDesc *prometheus.Desc
-	labels          []string
 }
 
-func newEndpointSetNodeCollector(labels ...string) *endpointSetNodeCollector {
-	if len(labels) == 0 {
-		labels = []string{string(ExternalLabels), string(StoreType)}
-	}
+func newEndpointSetNodeCollector() *endpointSetNodeCollector {
 	return &endpointSetNodeCollector{
 		storeNodes: map[component.Component]map[string]int{},
 		connectionsDesc: prometheus.NewDesc(
 			"thanos_store_nodes_grpc_connections",
 			"Number of gRPC connection to Store APIs. Opened connection means healthy store APIs available for Querier.",
-			labels, nil,
+			[]string{"external_labels", "store_type"}, nil,
 		),
-		labels: labels,
 	}
 }
 
-// truncateExtLabels truncates the stringify external labels with the format of {labels..}.
-func truncateExtLabels(s string, threshold int) string {
-	if len(s) > threshold {
-		return fmt.Sprintf("%s}", s[:threshold-1])
-	}
-	return s
-}
 func (c *endpointSetNodeCollector) Update(nodes map[component.Component]map[string]int) {
 	storeNodes := make(map[component.Component]map[string]int, len(nodes))
 	storePerExtLset := map[string]int{}
 
-	for storeType, occurrencesPerExtLset := range nodes {
-		storeNodes[storeType] = make(map[string]int, len(occurrencesPerExtLset))
-		for externalLabels, occurrences := range occurrencesPerExtLset {
-			externalLabels = truncateExtLabels(externalLabels, externalLabelLimit)
-			storePerExtLset[externalLabels] += occurrences
-			storeNodes[storeType][externalLabels] = occurrences
+	for k, v := range nodes {
+		storeNodes[k] = make(map[string]int, len(v))
+		for kk, vv := range v {
+			storePerExtLset[kk] += vv
+			storeNodes[k][kk] = vv
 		}
 	}
 
@@ -255,17 +228,7 @@ func (c *endpointSetNodeCollector) Collect(ch chan<- prometheus.Metric) {
 			if storeType != nil {
 				storeTypeStr = storeType.String()
 			}
-			// Select only required labels.
-			lbls := []string{}
-			for _, lbl := range c.labels {
-				switch lbl {
-				case string(ExternalLabels):
-					lbls = append(lbls, externalLabels)
-				case string(StoreType):
-					lbls = append(lbls, storeTypeStr)
-				}
-			}
-			ch <- prometheus.MustNewConstMetric(c.connectionsDesc, prometheus.GaugeValue, float64(occurrences), lbls...)
+			ch <- prometheus.MustNewConstMetric(c.connectionsDesc, prometheus.GaugeValue, float64(occurrences), externalLabels, storeTypeStr)
 		}
 	}
 }
@@ -305,9 +268,8 @@ func NewEndpointSet(
 	dialOpts []grpc.DialOption,
 	unhealthyEndpointTimeout time.Duration,
 	endpointInfoTimeout time.Duration,
-	endpointMetricLabels ...string,
 ) *EndpointSet {
-	endpointsMetric := newEndpointSetNodeCollector(endpointMetricLabels...)
+	endpointsMetric := newEndpointSetNodeCollector()
 	if reg != nil {
 		reg.MustRegister(endpointsMetric)
 	}
@@ -398,7 +360,6 @@ func (e *EndpointSet) Update(ctx context.Context) {
 	wg.Wait()
 
 	timedOutRefs := e.getTimedOutRefs()
-	e.endpointsMtx.RLock()
 	for addr, er := range e.endpoints {
 		_, isNew := newRefs[addr]
 		_, isExisting := existingRefs[addr]
@@ -407,7 +368,6 @@ func (e *EndpointSet) Update(ctx context.Context) {
 			staleRefs[addr] = er
 		}
 	}
-	e.endpointsMtx.RUnlock()
 
 	e.endpointsMtx.Lock()
 	defer e.endpointsMtx.Unlock()
@@ -436,7 +396,7 @@ func (e *EndpointSet) Update(ctx context.Context) {
 		if er.HasStoreAPI() && (er.ComponentType() == component.Sidecar || er.ComponentType() == component.Rule) &&
 			stats[component.Sidecar][extLset]+stats[component.Rule][extLset] > 0 {
 
-			level.Warn(e.logger).Log("msg", "found duplicate storeEndpoints producer (sidecar or ruler). This is not advices as it will malform data in in the same bucket",
+			level.Warn(e.logger).Log("msg", "found duplicate storeAPI producer (sidecar or ruler). This is not advices as it will malform data in in the same bucket",
 				"address", addr, "extLset", extLset, "duplicates", fmt.Sprintf("%v", stats[component.Sidecar][extLset]+stats[component.Rule][extLset]+1))
 		}
 		stats[er.ComponentType()][extLset]++
@@ -457,8 +417,6 @@ func (e *EndpointSet) updateEndpoint(ctx context.Context, spec *GRPCEndpointSpec
 // successful health check is older than the unhealthyEndpointTimeout.
 // Strict endpoints are never considered as timed out.
 func (e *EndpointSet) getTimedOutRefs() map[string]*endpointRef {
-	e.endpointsMtx.RLock()
-	defer e.endpointsMtx.RUnlock()
 	result := make(map[string]*endpointRef)
 
 	endpoints := e.endpoints
@@ -514,18 +472,16 @@ func (e *EndpointSet) GetStoreClients() []store.Client {
 }
 
 // GetQueryAPIClients returns a list of all active query API clients.
-func (e *EndpointSet) GetQueryAPIClients() []Client {
+func (e *EndpointSet) GetQueryAPIClients() []querypb.QueryClient {
 	endpoints := e.getQueryableRefs()
 
-	queryClients := make([]Client, 0, len(endpoints))
+	stores := make([]querypb.QueryClient, 0, len(endpoints))
 	for _, er := range endpoints {
 		if er.HasQueryAPI() {
-			_, maxt := er.timeRange()
-			client := querypb.NewQueryClient(er.cc)
-			queryClients = append(queryClients, NewClient(client, er.addr, maxt, er.labelSets()))
+			stores = append(stores, querypb.NewQueryClient(er.cc))
 		}
 	}
-	return queryClients
+	return stores
 }
 
 // GetRulesClients returns a list of all active rules clients.
@@ -629,8 +585,7 @@ type endpointRef struct {
 // newEndpointRef creates a new endpointRef with a gRPC channel to the given the IP address.
 // The call to newEndpointRef will return an error if establishing the channel fails.
 func (e *EndpointSet) newEndpointRef(ctx context.Context, spec *GRPCEndpointSpec) (*endpointRef, error) {
-	dialOpts := append(e.dialOpts, spec.dialOpts...)
-	conn, err := grpc.DialContext(ctx, spec.Addr(), dialOpts...)
+	conn, err := grpc.DialContext(ctx, spec.Addr(), e.dialOpts...)
 	if err != nil {
 		return nil, errors.Wrap(err, "dialing connection")
 	}
@@ -809,7 +764,7 @@ func (er *endpointRef) SupportsSharding() bool {
 	return er.metadata.Store.SupportsSharding
 }
 
-func (er *endpointRef) SupportsWithoutReplicaLabels() bool {
+func (er *endpointRef) SendsSortedSeries() bool {
 	er.mtx.RLock()
 	defer er.mtx.RUnlock()
 
@@ -817,13 +772,13 @@ func (er *endpointRef) SupportsWithoutReplicaLabels() bool {
 		return false
 	}
 
-	return er.metadata.Store.SupportsWithoutReplicaLabels
+	return er.metadata.Store.SendsSortedSeries
 }
 
 func (er *endpointRef) String() string {
 	mint, maxt := er.TimeRange()
 	return fmt.Sprintf(
-		"Addr: %s LabelSets: %v MinTime: %d MaxTime: %d",
+		"Addr: %s LabelSets: %v Mint: %d Maxt: %d",
 		er.addr, labelpb.PromLabelSetsToString(er.LabelSets()), mint, maxt,
 	)
 }
@@ -840,7 +795,7 @@ func (er *endpointRef) apisPresent() []string {
 	var apisPresent []string
 
 	if er.HasStoreAPI() {
-		apisPresent = append(apisPresent, "storeEndpoints")
+		apisPresent = append(apisPresent, "storeAPI")
 	}
 
 	if er.HasRulesAPI() {

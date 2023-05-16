@@ -71,6 +71,7 @@ type LazyBinaryReader struct {
 	logger                      log.Logger
 	bkt                         objstore.BucketReader
 	dir                         string
+	filepath                    string
 	id                          ulid.ULID
 	postingOffsetsInMemSampling int
 	metrics                     *LazyBinaryReaderMetrics
@@ -98,23 +99,22 @@ func NewLazyBinaryReader(
 	metrics *LazyBinaryReaderMetrics,
 	onClosed func(*LazyBinaryReader),
 ) (*LazyBinaryReader, error) {
-	if dir != "" {
-		indexHeaderFile := filepath.Join(dir, id.String(), block.IndexHeaderFilename)
-		// If the index-header doesn't exist we should download it.
-		if _, err := os.Stat(indexHeaderFile); err != nil {
-			if !os.IsNotExist(err) {
-				return nil, errors.Wrap(err, "read index header")
-			}
+	filepath := filepath.Join(dir, id.String(), block.IndexHeaderFilename)
 
-			level.Debug(logger).Log("msg", "the index-header doesn't exist on disk; recreating", "path", indexHeaderFile)
-
-			start := time.Now()
-			if _, err := WriteBinary(ctx, bkt, id, indexHeaderFile); err != nil {
-				return nil, errors.Wrap(err, "write index header")
-			}
-
-			level.Debug(logger).Log("msg", "built index-header file", "path", indexHeaderFile, "elapsed", time.Since(start))
+	// If the index-header doesn't exist we should download it.
+	if _, err := os.Stat(filepath); err != nil {
+		if !os.IsNotExist(err) {
+			return nil, errors.Wrap(err, "read index header")
 		}
+
+		level.Debug(logger).Log("msg", "the index-header doesn't exist on disk; recreating", "path", filepath)
+
+		start := time.Now()
+		if err := WriteBinary(ctx, bkt, id, filepath); err != nil {
+			return nil, errors.Wrap(err, "write index header")
+		}
+
+		level.Debug(logger).Log("msg", "built index-header file", "path", filepath, "elapsed", time.Since(start))
 	}
 
 	return &LazyBinaryReader{
@@ -122,6 +122,7 @@ func NewLazyBinaryReader(
 		logger:                      logger,
 		bkt:                         bkt,
 		dir:                         dir,
+		filepath:                    filepath,
 		id:                          id,
 		postingOffsetsInMemSampling: postingOffsetsInMemSampling,
 		metrics:                     metrics,
@@ -240,7 +241,7 @@ func (r *LazyBinaryReader) load() (returnErr error) {
 		return r.readerErr
 	}
 
-	level.Debug(r.logger).Log("msg", "lazy loading index-header", "block", r.id)
+	level.Debug(r.logger).Log("msg", "lazy loading index-header file", "path", r.filepath)
 	r.metrics.loadCount.Inc()
 	startTime := time.Now()
 
@@ -248,11 +249,11 @@ func (r *LazyBinaryReader) load() (returnErr error) {
 	if err != nil {
 		r.metrics.loadFailedCount.Inc()
 		r.readerErr = err
-		return errors.Wrapf(err, "lazy load index-header for block %s", r.id)
+		return errors.Wrapf(err, "lazy load index-header file at %s", r.filepath)
 	}
 
 	r.reader = reader
-	level.Debug(r.logger).Log("msg", "lazy loaded index-header", "block", r.id, "elapsed", time.Since(startTime))
+	level.Debug(r.logger).Log("msg", "lazy loaded index-header file", "path", r.filepath, "elapsed", time.Since(startTime))
 	r.metrics.loadDuration.Observe(time.Since(startTime).Seconds())
 
 	return nil

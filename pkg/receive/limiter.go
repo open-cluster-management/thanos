@@ -144,7 +144,6 @@ func (l *Limiter) loadConfig() error {
 				l.registerer,
 			),
 			int(maxWriteConcurrency),
-			gate.WriteRequests,
 		)
 	}
 	l.requestLimiter = newConfigRequestLimiter(

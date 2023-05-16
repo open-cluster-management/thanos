@@ -267,7 +267,7 @@ func TestSplitQuery(t *testing.T) {
 }
 
 func TestSplitByDay(t *testing.T) {
-	mergedResponse, err := PrometheusCodec.MergeResponse(nil, parsedResponse, parsedResponse)
+	mergedResponse, err := PrometheusCodec.MergeResponse(parsedResponse, parsedResponse)
 	require.NoError(t, err)
 
 	mergedHTTPResponse, err := PrometheusCodec.EncodeResponse(context.Background(), mergedResponse)
@@ -383,7 +383,7 @@ func Test_evaluateAtModifier(t *testing.T) {
 		tt := tt
 		t.Run(tt.in, func(t *testing.T) {
 			t.Parallel()
-			out, err := EvaluateAtModifierFunction(tt.in, start, end)
+			out, err := evaluateAtModifierFunction(tt.in, start, end)
 			if tt.expectedErrorCode != 0 {
 				require.Error(t, err)
 				httpResp, ok := httpgrpc.HTTPResponseFromError(err)

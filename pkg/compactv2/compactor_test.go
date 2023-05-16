@@ -26,10 +26,9 @@ import (
 	"github.com/prometheus/prometheus/tsdb/index"
 	"github.com/prometheus/prometheus/tsdb/tombstones"
 
-	"github.com/efficientgo/core/testutil"
-
 	"github.com/thanos-io/thanos/pkg/block"
 	"github.com/thanos-io/thanos/pkg/block/metadata"
+	"github.com/thanos-io/thanos/pkg/testutil"
 )
 
 func TestCompactor_WriteSeries_e2e(t *testing.T) {
@@ -663,13 +662,11 @@ func readBlockSeries(t *testing.T, bDir string) []seriesSamples {
 	testutil.Ok(t, err)
 	all = indexr.SortedPostings(all)
 
-	var builder labels.ScratchBuilder
 	var series []seriesSamples
 	var chks []chunks.Meta
 	for all.Next() {
 		s := seriesSamples{}
-		testutil.Ok(t, indexr.Series(all.At(), &builder, &chks))
-		s.lset = builder.Labels()
+		testutil.Ok(t, indexr.Series(all.At(), &s.lset, &chks))
 
 		for _, c := range chks {
 			c.Chunk, err = chunkr.Chunk(c)
@@ -677,7 +674,7 @@ func readBlockSeries(t *testing.T, bDir string) []seriesSamples {
 
 			var chk []sample
 			iter := c.Chunk.Iterator(nil)
-			for iter.Next() != chunkenc.ValNone {
+			for iter.Next() {
 				sa := sample{}
 				sa.t, sa.v = iter.At()
 				chk = append(chk, sa)

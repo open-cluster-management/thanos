@@ -23,10 +23,10 @@ func NewChunkSeriesMerger() storage.VerticalChunkSeriesMergeFunc {
 		}
 		return &storage.ChunkSeriesEntry{
 			Lset: series[0].Labels(),
-			ChunkIteratorFn: func(iterator chunks.Iterator) chunks.Iterator {
+			ChunkIteratorFn: func() chunks.Iterator {
 				iterators := make([]chunks.Iterator, 0, len(series))
 				for _, s := range series {
-					iterators = append(iterators, s.Iterator(nil))
+					iterators = append(iterators, s.Iterator())
 				}
 				return &dedupChunksIterator{
 					iterators: iterators,
@@ -196,13 +196,13 @@ func (o *overlappingMerger) iterator(baseChk chunks.Meta) chunks.Iterator {
 	case chunkenc.EncXOR:
 		// If XOR encoding, we need to deduplicate the samples and re-encode them to chunks.
 		return storage.NewSeriesToChunkEncoder(&storage.SeriesEntry{
-			SampleIteratorFn: func(_ chunkenc.Iterator) chunkenc.Iterator {
+			SampleIteratorFn: func() chunkenc.Iterator {
 				it = baseChk.Chunk.Iterator(nil)
 				for _, i := range o.xorIterators {
 					it = o.samplesMergeFunc(it, i)
 				}
 				return it
-			}}).Iterator(nil)
+			}}).Iterator()
 
 	case downsample.ChunkEncAggr:
 		// If Aggr encoding, each aggregated chunks need to be expanded and deduplicated,
@@ -243,10 +243,10 @@ func newAggrChunkIterator(iters [5]chunkenc.Iterator) chunks.Iterator {
 	return &aggrChunkIterator{
 		iters: iters,
 		countChkIter: storage.NewSeriesToChunkEncoder(&storage.SeriesEntry{
-			SampleIteratorFn: func(_ chunkenc.Iterator) chunkenc.Iterator {
+			SampleIteratorFn: func() chunkenc.Iterator {
 				return iters[downsample.AggrCount]
 			},
-		}).Iterator(nil),
+		}).Iterator(),
 	}
 }
 
@@ -312,7 +312,7 @@ func (a *aggrChunkIterator) toChunk(at downsample.AggrType, minTime, maxTime int
 		lastT int64
 		lastV float64
 	)
-	for it.Next() != chunkenc.ValNone {
+	for it.Next() {
 		lastT, lastV = it.At()
 		appender.Append(lastT, lastV)
 	}

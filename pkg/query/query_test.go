@@ -11,18 +11,17 @@ import (
 	"testing"
 	"time"
 
-	"github.com/efficientgo/core/testutil"
 	"github.com/go-kit/log"
 	"github.com/prometheus/prometheus/storage"
+
 	"github.com/thanos-io/thanos/pkg/component"
 	"github.com/thanos-io/thanos/pkg/store"
 	"github.com/thanos-io/thanos/pkg/store/storepb"
-	storetestutil "github.com/thanos-io/thanos/pkg/store/storepb/testutil"
-	"github.com/thanos-io/thanos/pkg/testutil/custom"
+	"github.com/thanos-io/thanos/pkg/testutil"
 )
 
 func TestMain(m *testing.M) {
-	custom.TolerantVerifyLeakMain(m)
+	testutil.TolerantVerifyLeakMain(m)
 }
 
 func TestQuerier_Proxy(t *testing.T) {
@@ -49,11 +48,10 @@ func TestQuerier_Proxy(t *testing.T) {
 				testutil.Ok(t, err)
 
 				// TODO(bwplotka): Parse external labels.
-				clients = append(clients, &storetestutil.TestClient{
-					Name:        fmt.Sprintf("store number %v", i),
-					StoreClient: storepb.ServerAsClient(selectedStore(store.NewTSDBStore(logger, st.storage.DB, component.Debug, nil), m, st.mint, st.maxt), 0),
-					MinTime:     st.mint,
-					MaxTime:     st.maxt,
+				clients = append(clients, inProcessClient{
+					t:           t,
+					StoreClient: storepb.ServerAsClient(SelectedStore(store.NewTSDBStore(logger, st.storage.DB, component.Debug, nil), m, st.mint, st.maxt), 0),
+					name:        fmt.Sprintf("store number %v", i),
 				})
 			}
 			return q(true,
@@ -79,17 +77,17 @@ func TestQuerier_Proxy(t *testing.T) {
 	})
 }
 
-// selectStore allows wrapping another storeEndpoints with additional time and matcher selection.
-type selectStore struct {
+// SelectStore allows wrapping another storeAPI with additional time and matcher selection.
+type SelectStore struct {
 	matchers []storepb.LabelMatcher
 
 	storepb.StoreServer
 	mint, maxt int64
 }
 
-// selectedStore wraps given store with selectStore.
-func selectedStore(wrapped storepb.StoreServer, matchers []storepb.LabelMatcher, mint, maxt int64) *selectStore {
-	return &selectStore{
+// SelectedStore wraps given store with SelectStore.
+func SelectedStore(wrapped storepb.StoreServer, matchers []storepb.LabelMatcher, mint, maxt int64) *SelectStore {
+	return &SelectStore{
 		StoreServer: wrapped,
 		matchers:    matchers,
 		mint:        mint,
@@ -97,7 +95,7 @@ func selectedStore(wrapped storepb.StoreServer, matchers []storepb.LabelMatcher,
 	}
 }
 
-func (s *selectStore) Info(ctx context.Context, r *storepb.InfoRequest) (*storepb.InfoResponse, error) {
+func (s *SelectStore) Info(ctx context.Context, r *storepb.InfoRequest) (*storepb.InfoResponse, error) {
 	resp, err := s.StoreServer.Info(ctx, r)
 	if err != nil {
 		return nil, err
@@ -112,7 +110,7 @@ func (s *selectStore) Info(ctx context.Context, r *storepb.InfoRequest) (*storep
 	return resp, nil
 }
 
-func (s *selectStore) Series(r *storepb.SeriesRequest, srv storepb.Store_SeriesServer) error {
+func (s *SelectStore) Series(r *storepb.SeriesRequest, srv storepb.Store_SeriesServer) error {
 	if r.MinTime < s.mint {
 		r.MinTime = s.mint
 	}

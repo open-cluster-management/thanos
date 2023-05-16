@@ -6,6 +6,8 @@ package replicate
 import (
 	"context"
 	"math/rand"
+	"strconv"
+	"strings"
 	"time"
 
 	extflag "github.com/efficientgo/tools/extkingpin"
@@ -15,7 +17,6 @@ import (
 	"github.com/oklog/ulid"
 	"github.com/opentracing/opentracing-go"
 	"github.com/pkg/errors"
-	amlabels "github.com/prometheus/alertmanager/pkg/labels"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/common/model"
@@ -41,17 +42,29 @@ const (
 )
 
 // ParseFlagMatchers parse flag into matchers.
-func ParseFlagMatchers(s string) ([]*labels.Matcher, error) {
-	amMatchers, err := amlabels.ParseMatchers(s)
-	if err != nil {
-		return nil, err
-	}
-	matchers := make([]*labels.Matcher, 0, len(amMatchers))
-	for _, a := range amMatchers {
-		if !model.LabelName.IsValid(model.LabelName(a.Name)) {
-			return nil, errors.Errorf("unsupported format for label %s", a.Name)
+func ParseFlagMatchers(s []string) ([]*labels.Matcher, error) {
+	matchers := make([]*labels.Matcher, 0, len(s))
+
+	for _, l := range s {
+		parts := strings.SplitN(l, "=", 2)
+		if len(parts) != 2 {
+			return nil, errors.Errorf("unrecognized label %q", l)
 		}
-		matchers = append(matchers, labels.MustNewMatcher(labels.MatchType(a.Type), a.Name, a.Value))
+
+		labelName := parts[0]
+		if !model.LabelName.IsValid(model.LabelName(labelName)) {
+			return nil, errors.Errorf("unsupported format for label %s", l)
+		}
+
+		labelValue, err := strconv.Unquote(parts[1])
+		if err != nil {
+			return nil, errors.Wrap(err, "unquote label value")
+		}
+		newEqualMatcher, err := labels.NewMatcher(labels.MatchEqual, labelName, labelValue)
+		if err != nil {
+			return nil, errors.Wrap(err, "new equal matcher")
+		}
+		matchers = append(matchers, newEqualMatcher)
 	}
 
 	return matchers, nil

@@ -9,7 +9,7 @@ import (
 
 	"github.com/go-kit/log"
 
-	"github.com/efficientgo/core/testutil"
+	"github.com/thanos-io/thanos/pkg/testutil"
 )
 
 func TestHashSmoke(t *testing.T) {

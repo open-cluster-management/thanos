@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"math"
 
-	"github.com/prometheus/prometheus/model/histogram"
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/tsdb/chunkenc"
 )
@@ -18,7 +17,7 @@ var PushdownMarker = labels.Label{Name: "__thanos_pushed_down", Value: "true"}
 
 type pushdownSeriesIterator struct {
 	a, b         chunkenc.Iterator
-	aval, bval   chunkenc.ValueType
+	aok, bok     bool
 	aused, bused bool
 
 	function func(float64, float64) float64
@@ -45,32 +44,24 @@ func newPushdownSeriesIterator(a, b chunkenc.Iterator, function string) *pushdow
 	}
 }
 
-func (it *pushdownSeriesIterator) Next() chunkenc.ValueType {
+func (it *pushdownSeriesIterator) Next() bool {
 	// Push A if we've used A before. Push B if we've used B before.
 	// Push both if we've used both before.
 	switch {
 	case !it.aused && !it.bused:
-		return chunkenc.ValNone
+		return false
 	case it.aused && !it.bused:
-		it.aval = it.a.Next()
+		it.aok = it.a.Next()
 	case !it.aused && it.bused:
-		it.bval = it.b.Next()
+		it.bok = it.b.Next()
 	case it.aused && it.bused:
-		it.aval = it.a.Next()
-		it.bval = it.b.Next()
+		it.aok = it.a.Next()
+		it.bok = it.b.Next()
 	}
 	it.aused = false
 	it.bused = false
 
-	if it.aval != chunkenc.ValNone {
-		return it.aval
-	}
-
-	if it.bval != chunkenc.ValNone {
-		return it.bval
-	}
-
-	return chunkenc.ValNone
+	return it.aok || it.bok
 }
 
 func (it *pushdownSeriesIterator) At() (int64, float64) {
@@ -78,7 +69,7 @@ func (it *pushdownSeriesIterator) At() (int64, float64) {
 	var timestamp int64
 	var val float64
 
-	if it.aval != chunkenc.ValNone && it.bval != chunkenc.ValNone {
+	if it.aok && it.bok {
 		ta, va := it.a.At()
 		tb, vb := it.b.At()
 		if ta == tb {
@@ -97,7 +88,7 @@ func (it *pushdownSeriesIterator) At() (int64, float64) {
 				it.bused = true
 			}
 		}
-	} else if it.aval != chunkenc.ValNone {
+	} else if it.aok {
 		ta, va := it.a.At()
 		val = va
 		timestamp = ta
@@ -112,28 +103,14 @@ func (it *pushdownSeriesIterator) At() (int64, float64) {
 	return timestamp, val
 }
 
-// TODO(rabenhorst): Needs to be implemented for native histogram support.
-func (it *pushdownSeriesIterator) AtHistogram() (int64, *histogram.Histogram) {
-	panic("not implemented")
-}
-
-func (it *pushdownSeriesIterator) AtFloatHistogram() (int64, *histogram.FloatHistogram) {
-	panic("not implemented")
-}
-
-func (it *pushdownSeriesIterator) AtT() int64 {
-	t := it.a.AtT()
-	return t
-}
-
-func (it *pushdownSeriesIterator) Seek(t int64) chunkenc.ValueType {
+func (it *pushdownSeriesIterator) Seek(t int64) bool {
 	for {
-		ts := it.AtT()
+		ts, _ := it.At()
 		if ts >= t {
-			return chunkenc.ValFloat
+			return true
 		}
-		if it.Next() == chunkenc.ValNone {
-			return chunkenc.ValNone
+		if !it.Next() {
+			return false
 		}
 	}
 }

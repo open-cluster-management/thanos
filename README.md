@@ -41,28 +41,20 @@ Concretely the aims of the project are:
 
 ## Architecture Overview
 
-Deployment with Sidecar for Kubernetes:
+Deployment with Sidecar:
 
-<!---
-Source file to copy and edit: https://docs.google.com/drawings/d/1AiMc1qAjASMbtqL6PNs0r9-ynGoZ9LIAtf0b9PjILxw/edit?usp=sharing
--->
+![Sidecar](https://docs.google.com/drawings/d/e/2PACX-1vTBFKKgf8YDInJyRakPE8eZZg9phTlOsBB2ogNkFvhNGbZ8YDvz_cGMbxWZBG1G6hpsQfSX145FpYcv/pub?w=960&h=720)
 
-![Sidecar](https://docs.google.com/drawings/d/e/2PACX-1vSJd32gPh8-MC5Ko0-P-v1KQ0Xnxa0qmsVXowtkwVGlczGfVW-Vd415Y6F129zvh3y0vHLBZcJeZEoz/pub?w=960&h=720)
+Deployment with Receive:
 
-Deployment with Receive in order to scale out or implement with other remote write compatible sources:
-
-<!---
-Source file to copy and edit: https://docs.google.com/drawings/d/1iimTbcicKXqz0FYtSfz04JmmVFLVO9BjAjEzBm5538w/edit?usp=sharing
--->
-
-![Receive](https://docs.google.com/drawings/d/e/2PACX-1vRdYP__uDuygGR5ym1dxBzU6LEx5v7Rs1cAUKPsl5BZrRGVl5YIj5lsD_FOljeIVOGWatdAI9pazbCP/pub?w=960&h=720)
+![Receive](https://docs.google.com/drawings/d/e/2PACX-1vTfko27YB_3ab7ZL8ODNG5uCcrpqKxhmqaz3lW-yhGN3_oNxkTrqXmwwlcZjaWf3cGgAJIM4CMwwkEV/pub?w=960&h=720)
 
 ## Thanos Philosophy
 
 The philosophy of Thanos and our community is borrowing much from UNIX philosophy and the golang programming language.
 
 * Each subcommand should do one thing and do it well
-  * e.g. thanos query proxies incoming calls to known store API endpoints merging the result
+  * eg. thanos query proxies incoming calls to known store API endpoints merging the result
 * Write components that work together
   * e.g. blocks should be stored in native prometheus format
 * Make it easy to read, write, and, run components
@@ -96,3 +88,5 @@ See [`Adopters List`](website/data/adopters.yml).
 ## Maintainers
 
 See [MAINTAINERS.md](MAINTAINERS.md)
+
+Rebuild Image: Thu Jan  5 09:40:22 EST 2023
