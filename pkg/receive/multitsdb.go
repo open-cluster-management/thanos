@@ -59,7 +59,7 @@ type MultiTSDB struct {
 }
 
 // NewMultiTSDB creates new MultiTSDB.
-// NOTE: Passed labels has to be sorted by name.
+// NOTE: Passed labels must be sorted lexicographically (alphabetically).
 func NewMultiTSDB(
 	dataDir string,
 	l log.Logger,
@@ -116,7 +116,7 @@ func (l *localClient) TimeRange() (mint int64, maxt int64) {
 func (l *localClient) String() string {
 	mint, maxt := l.timeRangeFunc()
 	return fmt.Sprintf(
-		"LabelSets: %v Mint: %d Maxt: %d",
+		"LabelSets: %v MinTime: %d MaxTime: %d",
 		labelpb.PromLabelSetsToString(l.LabelSets()), mint, maxt,
 	)
 }
@@ -129,7 +129,7 @@ func (l *localClient) SupportsSharding() bool {
 	return true
 }
 
-func (l *localClient) SendsSortedSeries() bool {
+func (l *localClient) SupportsWithoutReplicaLabels() bool {
 	return true
 }
 
@@ -159,13 +159,16 @@ func (t *tenant) store() *store.TSDBStore {
 	return t.storeTSDB
 }
 
-func (t *tenant) client() store.Client {
+func (t *tenant) client(logger log.Logger) store.Client {
 	t.mtx.RLock()
 	defer t.mtx.RUnlock()
 
-	store := t.store()
-	client := storepb.ServerAsClient(store, 0)
-	return newLocalClient(client, store.LabelSet, store.TimeRange)
+	tsdbStore := t.store()
+	if tsdbStore == nil {
+		return nil
+	}
+	client := storepb.ServerAsClient(store.NewRecoverableStoreServer(logger, tsdbStore), 0)
+	return newLocalClient(client, tsdbStore.LabelSet, tsdbStore.TimeRange)
 }
 
 func (t *tenant) exemplars() *exemplars.TSDB {
@@ -322,16 +325,22 @@ func (t *MultiTSDB) pruneTSDB(ctx context.Context, logger log.Logger, tenantInst
 		return false, nil
 	}
 
-	sinceLastAppend := time.Since(time.UnixMilli(head.MaxTime()))
-	if sinceLastAppend.Milliseconds() <= t.tsdbOpts.RetentionDuration {
+	sinceLastAppendMillis := time.Since(time.UnixMilli(head.MaxTime())).Milliseconds()
+	compactThreshold := int64(1.5 * float64(t.tsdbOpts.MaxBlockDuration))
+	if sinceLastAppendMillis <= compactThreshold {
 		return false, nil
 	}
 
-	level.Info(logger).Log("msg", "Pruning tenant")
+	level.Info(logger).Log("msg", "Compacting tenant")
 	if err := tdb.CompactHead(tsdb.NewRangeHead(head, head.MinTime(), head.MaxTime())); err != nil {
 		return false, err
 	}
 
+	if sinceLastAppendMillis <= t.tsdbOpts.RetentionDuration {
+		return false, nil
+	}
+
+	level.Info(logger).Log("msg", "Pruning tenant")
 	if tenantInstance.shipper() != nil {
 		uploaded, err := tenantInstance.shipper().Sync(ctx)
 		if err != nil {
@@ -423,7 +432,10 @@ func (t *MultiTSDB) TSDBLocalClients() []store.Client {
 
 	res := make([]store.Client, 0, len(t.tenants))
 	for _, tenant := range t.tenants {
-		res = append(res, tenant.client())
+		client := tenant.client(t.logger)
+		if client != nil {
+			res = append(res, client)
+		}
 	}
 
 	return res

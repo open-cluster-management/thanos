@@ -11,12 +11,16 @@ import (
 	"go.uber.org/atomic"
 	"go.uber.org/goleak"
 
+	"github.com/efficientgo/core/testutil"
 	"github.com/thanos-io/thanos/pkg/gate"
-	"github.com/thanos-io/thanos/pkg/testutil"
 )
 
 func TestMain(m *testing.M) {
-	goleak.VerifyTestMain(m)
+	goleak.VerifyTestMain(
+		m,
+		// https://github.com/rueian/rueidis/blob/v0.0.90/pipe.go#L204.
+		goleak.IgnoreTopFunction("github.com/rueian/rueidis.(*pipe).backgroundPing"),
+	)
 }
 
 func TestDoWithBatch(t *testing.T) {
@@ -58,7 +62,7 @@ func TestDoWithBatch(t *testing.T) {
 			items:           []string{"key1", "key2", "key3", "key4", "key5"},
 			batchSize:       2,
 			expectedBatches: 3,
-			concurrency:     gate.New(prometheus.NewPedanticRegistry(), 1),
+			concurrency:     gate.New(prometheus.NewPedanticRegistry(), 1, gate.Queries),
 		},
 	}
 

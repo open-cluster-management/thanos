@@ -7,6 +7,7 @@ import (
 	"context"
 
 	"github.com/pkg/errors"
+	"github.com/prometheus/prometheus/model/histogram"
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/tsdb"
@@ -23,7 +24,7 @@ type lazyPopulateChunkSeriesSet struct {
 	all index.Postings
 
 	bufChks []chunks.Meta
-	bufLbls labels.Labels
+	bufLbls labels.ScratchBuilder
 
 	curr *storage.ChunkSeriesEntry
 	err  error
@@ -52,13 +53,11 @@ func (s *lazyPopulateChunkSeriesSet) Next() bool {
 			s.bufChks[i].Chunk = &lazyPopulatableChunk{cr: s.sReader.cr, m: &s.bufChks[i]}
 		}
 		s.curr = &storage.ChunkSeriesEntry{
-			Lset: make(labels.Labels, len(s.bufLbls)),
-			ChunkIteratorFn: func() chunks.Iterator {
+			Lset: s.bufLbls.Labels(),
+			ChunkIteratorFn: func(_ chunks.Iterator) chunks.Iterator {
 				return storage.NewListChunkSeriesIterator(s.bufChks...)
 			},
 		}
-		// TODO: Do we need to copy this?
-		copy(s.curr.Lset, s.bufLbls)
 		return true
 	}
 	return false
@@ -87,10 +86,17 @@ type lazyPopulatableChunk struct {
 
 type errChunkIterator struct{ err error }
 
-func (e errChunkIterator) Seek(int64) bool      { return false }
-func (e errChunkIterator) At() (int64, float64) { return 0, 0 }
-func (e errChunkIterator) Next() bool           { return false }
-func (e errChunkIterator) Err() error           { return e.err }
+func (e errChunkIterator) Seek(int64) chunkenc.ValueType { return chunkenc.ValNone }
+func (e errChunkIterator) At() (int64, float64)          { return 0, 0 }
+
+// TODO(rabenhorst): Needs to be implemented for native histogram support.
+func (e errChunkIterator) AtHistogram() (int64, *histogram.Histogram) { panic("not implemented") }
+func (e errChunkIterator) AtFloatHistogram() (int64, *histogram.FloatHistogram) {
+	panic("not implemented")
+}
+func (e errChunkIterator) AtT() int64               { return 0 }
+func (e errChunkIterator) Next() chunkenc.ValueType { return chunkenc.ValNone }
+func (e errChunkIterator) Err() error               { return e.err }
 
 type errChunk struct{ err errChunkIterator }
 
@@ -179,7 +185,7 @@ func (w *Compactor) write(ctx context.Context, symbols index.StringIter, populat
 		}
 
 		s := populatedSet.At()
-		chksIter := s.Iterator()
+		chksIter := s.Iterator(nil)
 		chks = chks[:0]
 		for chksIter.Next() {
 			// We are not iterating in streaming way over chunk as it's more efficient to do bulk write for index and

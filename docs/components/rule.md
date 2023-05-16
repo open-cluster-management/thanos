@@ -158,7 +158,7 @@ The most important metrics to alert on are:
 
 * `prometheus_rule_evaluation_failures_total`. If greater than 0, it means that that rule failed to be evaluated, which results in either gap in rule or potentially ignored alert. This metric might indicate problems on the queryAPI endpoint you use. Alert heavily on this if this happens for longer than your alert thresholds. `strategy` label will tell you if failures comes from rules that tolerate [partial response](#partial-response) or not.
 
-* `prometheus_rule_group_last_duration_seconds < prometheus_rule_group_interval_seconds` If the difference is large, it means that rule evaluation took more time than the scheduled interval. It can indicate that your query backend (e.g Querier) takes too much time to evaluate the query, i.e. that it is not fast enough to fill the rule. This might indicate other problems like slow StoreAPis or too complex query expression in rule.
+* `prometheus_rule_group_last_duration_seconds > prometheus_rule_group_interval_seconds` If the difference is positive, it means that rule evaluation took more time than the scheduled interval, and data for some intervals could be missing. It can indicate that your query backend (e.g Querier) takes too much time to evaluate the query, i.e. that it is not fast enough to fill the rule. This might indicate other problems like slow StoreAPis or too complex query expression in rule.
 
 * `thanos_rule_evaluation_with_warnings_total`. If you choose to use Rules and Alerts with [partial response strategy's](#partial-response) value as "warn", this metric will tell you how many evaluation ended up with some kind of warning. To see the actual warnings see WARN log level. This might suggest that those evaluations return partial response and might not be accurate.
 
@@ -263,8 +263,8 @@ and storing old blocks in bucket.
 
 Flags:
       --alert.label-drop=ALERT.LABEL-DROP ...
-                                 Labels by name to drop before sending to
-                                 alertmanager. This allows alert to be
+                                 Labels by name to drop before sending
+                                 to alertmanager. This allows alert to be
                                  deduplicated on replica label (repeated).
                                  Similar Prometheus alert relabelling
       --alert.query-url=ALERT.QUERY-URL
@@ -278,20 +278,20 @@ Flags:
                                  Path to YAML file that contains alert
                                  relabelling configuration.
       --alertmanagers.config=<content>
-                                 Alternative to 'alertmanagers.config-file' flag
-                                 (mutually exclusive). Content of YAML file that
-                                 contains alerting configuration. See format
-                                 details:
+                                 Alternative to 'alertmanagers.config-file'
+                                 flag (mutually exclusive). Content
+                                 of YAML file that contains alerting
+                                 configuration. See format details:
                                  https://thanos.io/tip/components/rule.md/#configuration.
-                                 If defined, it takes precedence over the
-                                 '--alertmanagers.url' and
+                                 If defined, it takes precedence
+                                 over the '--alertmanagers.url' and
                                  '--alertmanagers.send-timeout' flags.
       --alertmanagers.config-file=<file-path>
                                  Path to YAML file that contains alerting
                                  configuration. See format details:
                                  https://thanos.io/tip/components/rule.md/#configuration.
-                                 If defined, it takes precedence over the
-                                 '--alertmanagers.url' and
+                                 If defined, it takes precedence
+                                 over the '--alertmanagers.url' and
                                  '--alertmanagers.send-timeout' flags.
       --alertmanagers.sd-dns-interval=30s
                                  Interval between DNS resolutions of
@@ -300,17 +300,23 @@ Flags:
                                  Timeout for sending alerts to Alertmanager
       --alertmanagers.url=ALERTMANAGERS.URL ...
                                  Alertmanager replica URLs to push firing
-                                 alerts. Ruler claims success if push to at
-                                 least one alertmanager from discovered
-                                 succeeds. The scheme should not be empty e.g
-                                 `http` might be used. The scheme may be
+                                 alerts. Ruler claims success if push to
+                                 at least one alertmanager from discovered
+                                 succeeds. The scheme should not be empty
+                                 e.g `http` might be used. The scheme may be
                                  prefixed with 'dns+' or 'dnssrv+' to detect
                                  Alertmanager IPs through respective DNS
-                                 lookups. The port defaults to 9093 or the SRV
-                                 record's value. The URL path is used as a
+                                 lookups. The port defaults to 9093 or the
+                                 SRV record's value. The URL path is used as a
                                  prefix for the regular Alertmanager API path.
       --data-dir="data/"         data directory
       --eval-interval=1m         The default evaluation interval to use.
+      --for-grace-period=10m     Minimum duration between alert and restored
+                                 "for" state. This is maintained only for alerts
+                                 with configured "for" time greater than grace
+                                 period.
+      --for-outage-tolerance=1h  Max time to tolerate prometheus outage for
+                                 restoring "for" state of alert.
       --grpc-address="0.0.0.0:10901"
                                  Listen ip:port address for gRPC endpoints
                                  (StoreAPI). Make sure this address is routable
@@ -320,14 +326,14 @@ Flags:
       --grpc-server-tls-cert=""  TLS Certificate for gRPC server, leave blank to
                                  disable TLS
       --grpc-server-tls-client-ca=""
-                                 TLS CA to verify clients against. If no client
-                                 CA is specified, there is no client
+                                 TLS CA to verify clients against. If no
+                                 client CA is specified, there is no client
                                  verification on server side. (tls.NoClientCert)
       --grpc-server-tls-key=""   TLS Key for the gRPC server, leave blank to
                                  disable TLS
       --hash-func=               Specify which hash function to use when
-                                 calculating the hashes of produced files. If no
-                                 function has been specified, it does not
+                                 calculating the hashes of produced files.
+                                 If no function has been specified, it does not
                                  happen. This permits avoiding downloading some
                                  files twice albeit at some performance cost.
                                  Possible values are: "", "SHA256".
@@ -348,34 +354,34 @@ Flags:
       --log.format=logfmt        Log format to use. Possible options: logfmt or
                                  json.
       --log.level=info           Log filtering level.
-      --log.request.decision=    Deprecation Warning - This flag would be soon
-                                 deprecated, and replaced with
-                                 `request.logging-config`. Request Logging for
-                                 logging the start and end of requests. By
+      --log.request.decision=    Deprecation Warning - This flag would
+                                 be soon deprecated, and replaced with
+                                 `request.logging-config`. Request Logging
+                                 for logging the start and end of requests. By
                                  default this flag is disabled. LogFinishCall:
                                  Logs the finish call of the requests.
                                  LogStartAndFinishCall: Logs the start and
                                  finish call of the requests. NoLogCall: Disable
                                  request logging.
       --objstore.config=<content>
-                                 Alternative to 'objstore.config-file' flag
-                                 (mutually exclusive). Content of YAML file that
-                                 contains object store configuration. See format
-                                 details:
-                                 https://thanos.io/tip/thanos/storage.md/#configuration
-      --objstore.config-file=<file-path>
-                                 Path to YAML file that contains object store
+                                 Alternative to 'objstore.config-file'
+                                 flag (mutually exclusive). Content of
+                                 YAML file that contains object store
                                  configuration. See format details:
                                  https://thanos.io/tip/thanos/storage.md/#configuration
-      --query=<query> ...        Addresses of statically configured query API
-                                 servers (repeatable). The scheme may be
+      --objstore.config-file=<file-path>
+                                 Path to YAML file that contains object
+                                 store configuration. See format details:
+                                 https://thanos.io/tip/thanos/storage.md/#configuration
+      --query=<query> ...        Addresses of statically configured query
+                                 API servers (repeatable). The scheme may be
                                  prefixed with 'dns+' or 'dnssrv+' to detect
                                  query API servers through respective DNS
                                  lookups.
       --query.config=<content>   Alternative to 'query.config-file' flag
-                                 (mutually exclusive). Content of YAML file that
-                                 contains query API servers configuration. See
-                                 format details:
+                                 (mutually exclusive). Content of YAML
+                                 file that contains query API servers
+                                 configuration. See format details:
                                  https://thanos.io/tip/components/rule.md/#configuration.
                                  If defined, it takes precedence over the
                                  '--query' and '--query.sd-files' flags.
@@ -385,6 +391,9 @@ Flags:
                                  https://thanos.io/tip/components/rule.md/#configuration.
                                  If defined, it takes precedence over the
                                  '--query' and '--query.sd-files' flags.
+      --query.default-step=1s    Default range query step to use. This is
+                                 only used in stateless Ruler and alert state
+                                 restoration.
       --query.http-method=POST   HTTP method to use when sending queries.
                                  Possible options: [GET, POST]
       --query.sd-dns-interval=30s
@@ -396,32 +405,32 @@ Flags:
       --query.sd-interval=5m     Refresh interval to re-read file SD files.
                                  (used as a fallback)
       --remote-write.config=<content>
-                                 Alternative to 'remote-write.config-file' flag
-                                 (mutually exclusive). Content of YAML config
-                                 for the remote-write configurations, that
-                                 specify servers where samples should be sent to
-                                 (see
+                                 Alternative to 'remote-write.config-file'
+                                 flag (mutually exclusive). Content
+                                 of YAML config for the remote-write
+                                 configurations, that specify servers
+                                 where samples should be sent to (see
                                  https://prometheus.io/docs/prometheus/latest/configuration/configuration/#remote_write).
-                                 This automatically enables stateless mode for
-                                 ruler and no series will be stored in the
+                                 This automatically enables stateless mode
+                                 for ruler and no series will be stored in the
                                  ruler's TSDB. If an empty config (or file) is
                                  provided, the flag is ignored and ruler is run
                                  with its own TSDB.
       --remote-write.config-file=<file-path>
                                  Path to YAML config for the remote-write
-                                 configurations, that specify servers where
-                                 samples should be sent to (see
+                                 configurations, that specify servers
+                                 where samples should be sent to (see
                                  https://prometheus.io/docs/prometheus/latest/configuration/configuration/#remote_write).
-                                 This automatically enables stateless mode for
-                                 ruler and no series will be stored in the
+                                 This automatically enables stateless mode
+                                 for ruler and no series will be stored in the
                                  ruler's TSDB. If an empty config (or file) is
                                  provided, the flag is ignored and ruler is run
                                  with its own TSDB.
       --request.logging-config=<content>
                                  Alternative to 'request.logging-config-file'
-                                 flag (mutually exclusive). Content of YAML file
-                                 with request logging configuration. See format
-                                 details:
+                                 flag (mutually exclusive). Content
+                                 of YAML file with request logging
+                                 configuration. See format details:
                                  https://thanos.io/tip/thanos/logging.md/#configuration
       --request.logging-config-file=<file-path>
                                  Path to YAML file with request logging
@@ -429,10 +438,14 @@ Flags:
                                  https://thanos.io/tip/thanos/logging.md/#configuration
       --resend-delay=1m          Minimum amount of time to wait before resending
                                  an alert to Alertmanager.
-      --rule-file=rules/ ...     Rule files that should be used by rule manager.
-                                 Can be in glob format (repeated). Note that
-                                 rules are not automatically detected, use
-                                 SIGHUP or do HTTP POST /-/reload to re-read
+      --restore-ignored-label=RESTORE-IGNORED-LABEL ...
+                                 Label names to be ignored when restoring alerts
+                                 from the remote storage. This is only used in
+                                 stateless mode.
+      --rule-file=rules/ ...     Rule files that should be used by rule
+                                 manager. Can be in glob format (repeated).
+                                 Note that rules are not automatically detected,
+                                 use SIGHUP or do HTTP POST /-/reload to re-read
                                  them.
       --shipper.upload-compacted
                                  If true shipper will try to upload compacted
@@ -440,14 +453,25 @@ Flags:
                                  Works only if compaction is disabled on
                                  Prometheus. Do it once and then disable the
                                  flag when done.
+      --store.limits.request-samples=0
+                                 The maximum samples allowed for a single
+                                 Series request, The Series call fails if
+                                 this limit is exceeded. 0 means no limit.
+                                 NOTE: For efficiency the limit is internally
+                                 implemented as 'chunks limit' considering each
+                                 chunk contains a maximum of 120 samples.
+      --store.limits.request-series=0
+                                 The maximum series allowed for a single Series
+                                 request. The Series call fails if this limit is
+                                 exceeded. 0 means no limit.
       --tracing.config=<content>
                                  Alternative to 'tracing.config-file' flag
-                                 (mutually exclusive). Content of YAML file with
-                                 tracing configuration. See format details:
+                                 (mutually exclusive). Content of YAML file
+                                 with tracing configuration. See format details:
                                  https://thanos.io/tip/thanos/tracing.md/#configuration
       --tracing.config-file=<file-path>
-                                 Path to YAML file with tracing configuration.
-                                 See format details:
+                                 Path to YAML file with tracing
+                                 configuration. See format details:
                                  https://thanos.io/tip/thanos/tracing.md/#configuration
       --tsdb.block-duration=2h   Block duration for TSDB block.
       --tsdb.no-lockfile         Do not create lockfile in TSDB data directory.
@@ -460,20 +484,20 @@ Flags:
                                  Thanos. By default Thanos sets CORS headers to
                                  be allowed by all.
       --web.external-prefix=""   Static prefix for all HTML links and redirect
-                                 URLs in the bucket web UI interface. Actual
-                                 endpoints are still served on / or the
-                                 web.route-prefix. This allows thanos bucket web
-                                 UI to be served behind a reverse proxy that
+                                 URLs in the bucket web UI interface.
+                                 Actual endpoints are still served on / or the
+                                 web.route-prefix. This allows thanos bucket
+                                 web UI to be served behind a reverse proxy that
                                  strips a URL sub-path.
       --web.prefix-header=""     Name of HTTP request header used for dynamic
-                                 prefixing of UI links and redirects. This
-                                 option is ignored if web.external-prefix
-                                 argument is set. Security risk: enable this
-                                 option only if a reverse proxy in front of
-                                 thanos is resetting the header. The
-                                 --web.prefix-header=X-Forwarded-Prefix option
-                                 can be useful, for example, if Thanos UI is
-                                 served via Traefik reverse proxy with
+                                 prefixing of UI links and redirects.
+                                 This option is ignored if web.external-prefix
+                                 argument is set. Security risk: enable
+                                 this option only if a reverse proxy in
+                                 front of thanos is resetting the header.
+                                 The --web.prefix-header=X-Forwarded-Prefix
+                                 option can be useful, for example, if Thanos
+                                 UI is served via Traefik reverse proxy with
                                  PathPrefixStrip option enabled, which sends the
                                  stripped prefix value in X-Forwarded-Prefix
                                  header. This allows thanos UI to be served on a
