@@ -1,0 +1,18 @@
+FROM registry.ci.openshift.org/stolostron/builder:go1.20-linux as builder
+
+WORKDIR $GOPATH/src/github.com/thanos-io/thanos
+
+COPY . $GOPATH/src/github.com/thanos-io/thanos
+
+RUN git update-index --refresh; make build -f Makefile.prow
+
+# -----------------------------------------------------------------------------
+
+# FROM quay.io/prometheus/busybox@sha256:${BASE_DOCKER_SHA}
+FROM registry.access.redhat.com/ubi8/ubi-minimal:latest
+LABEL maintainer="The ACM Thanos Authors"
+
+COPY --from=builder /go/bin/thanos /bin/thanos
+RUN microdnf update -y && microdnf clean all
+
+ENTRYPOINT [ "/bin/thanos" ]
