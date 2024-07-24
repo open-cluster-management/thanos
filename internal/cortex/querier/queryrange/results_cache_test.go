@@ -113,25 +113,6 @@ var (
 			},
 		},
 	}
-	parsedHistogramResponse = &PrometheusResponse{
-		Status: "success",
-		Data: PrometheusData{
-			ResultType: model.ValMatrix.String(),
-			Result: []SampleStream{
-				{
-					Labels: []cortexpb.LabelAdapter{
-						{Name: "fake", Value: "histogram"},
-					},
-					Histograms: []SampleHistogramPair{
-						{
-							Timestamp: 1536673680000,
-							Histogram: genSampleHistogram(),
-						},
-					},
-				},
-			},
-		},
-	}
 )
 
 func mkAPIResponse(start, end, step int64) *PrometheusResponse {
