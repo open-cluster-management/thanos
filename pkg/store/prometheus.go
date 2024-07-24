@@ -171,11 +171,6 @@ func (p *PrometheusStore) Series(r *storepb.SeriesRequest, seriesSrv storepb.Sto
 		extLsetToRemove[lbl] = struct{}{}
 	}
 
-	extLsetToRemove := map[string]struct{}{}
-	for _, lbl := range r.WithoutReplicaLabels {
-		extLsetToRemove[lbl] = struct{}{}
-	}
-
 	if r.SkipChunks {
 		finalExtLset := rmLabels(extLset.Copy(), extLsetToRemove)
 		labelMaps, err := p.client.SeriesInGRPC(s.Context(), p.base, matchers, r.MinTime, r.MaxTime)

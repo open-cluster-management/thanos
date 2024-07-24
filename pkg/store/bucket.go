@@ -1960,8 +1960,6 @@ func (s *BucketStore) LabelValues(ctx context.Context, req *storepb.LabelValuesR
 
 	tenant, _ := tenancy.GetTenantFromGRPCMetadata(ctx)
 
-	tenant, _ := tenancy.GetTenantFromGRPCMetadata(ctx)
-
 	resHints := &hintspb.LabelValuesResponseHints{}
 
 	g, gctx := errgroup.WithContext(ctx)

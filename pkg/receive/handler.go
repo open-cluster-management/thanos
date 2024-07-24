@@ -329,32 +329,6 @@ func getSortedStringSliceDiff(slice1, slice2 []string) []string {
 	return difference
 }
 
-// getSortedStringSliceDiff returns items which are in slice1 but not in slice2.
-// The returned slice also only contains unique items i.e. it is a set.
-func getSortedStringSliceDiff(slice1, slice2 []string) []string {
-	slice1Items := make(map[string]struct{}, len(slice1))
-	slice2Items := make(map[string]struct{}, len(slice2))
-
-	for _, s1 := range slice1 {
-		slice1Items[s1] = struct{}{}
-	}
-	for _, s2 := range slice2 {
-		slice2Items[s2] = struct{}{}
-	}
-
-	var difference = make([]string, 0)
-	for s1 := range slice1Items {
-		_, s2Contains := slice2Items[s1]
-		if s2Contains {
-			continue
-		}
-		difference = append(difference, s1)
-	}
-	sort.Strings(difference)
-
-	return difference
-}
-
 // Verifies whether the server is ready or not.
 func (h *Handler) isReady() bool {
 	h.mtx.RLock()
@@ -1420,7 +1394,7 @@ func (p *peerGroup) getConnection(ctx context.Context, addr string) (WriteableSt
 	c, ok := p.connections[addr]
 	p.m.RUnlock()
 	if ok {
-		return storepb.NewWriteableStoreClient(c), nil
+		return c, nil
 	}
 
 	p.m.Lock()
@@ -1428,7 +1402,7 @@ func (p *peerGroup) getConnection(ctx context.Context, addr string) (WriteableSt
 	// Make sure that another caller hasn't created the connection since obtaining the write lock.
 	c, ok = p.connections[addr]
 	if ok {
-		return storepb.NewWriteableStoreClient(c), nil
+		return c, nil
 	}
 	conn, err := p.dialer(ctx, addr, p.dialOpts...)
 	if err != nil {

@@ -593,16 +593,6 @@ func (s *ProxyStore) LabelValues(ctx context.Context, r *storepb.LabelValuesRequ
 	gctx = metadata.AppendToOutgoingContext(gctx, tenancy.DefaultTenantHeader, tenant)
 	level.Debug(s.logger).Log("msg", "Tenant info in LabelValues()", "tenant", tenant)
 
-	// We may arrive here either via the promql engine
-	// or as a result of a grpc call in layered queries
-	tenant, foundTenant := tenancy.GetTenantFromGRPCMetadata(gctx)
-	if !foundTenant {
-		level.Debug(s.logger).Log("msg", "using tenant from context instead of metadata")
-		if gctx.Value(tenancy.TenantKey) != nil {
-			tenant = gctx.Value(tenancy.TenantKey).(string)
-		}
-	}
-
 	gctx = metadata.AppendToOutgoingContext(gctx, tenancy.DefaultTenantHeader, tenant)
 	level.Debug(s.logger).Log("msg", "Tenant info in LabelValues()", "tenant", tenant)
 
