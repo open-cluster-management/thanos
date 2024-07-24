@@ -1740,52 +1740,6 @@ func (it *sampleIterator) AtT() int64 {
 	return it.l[it.i].t
 }
 
-type histogramPair struct {
-	t int64
-	h *histogram.Histogram
-}
-
-type histogramIterator struct {
-	l []*histogramPair
-	i int
-}
-
-func newHistogramIterator(l []*histogramPair) *histogramIterator {
-	return &histogramIterator{l: l, i: -1}
-}
-
-func (it *histogramIterator) Err() error {
-	return nil
-}
-
-func (it *histogramIterator) Next() chunkenc.ValueType {
-	if it.i >= len(it.l)-1 {
-		return chunkenc.ValNone
-	}
-	it.i++
-	return chunkenc.ValHistogram
-}
-
-func (it *histogramIterator) Seek(int64) chunkenc.ValueType {
-	panic("unexpected")
-}
-
-func (it *histogramIterator) At() (t int64, v float64) {
-	panic("not implemented")
-}
-
-func (it *histogramIterator) AtHistogram() (int64, *histogram.Histogram) {
-	return it.l[it.i].t, it.l[it.i].h
-}
-
-func (it *histogramIterator) AtFloatHistogram() (int64, *histogram.FloatHistogram) {
-	panic("not implemented")
-}
-
-func (it *histogramIterator) AtT() int64 {
-	return it.l[it.i].t
-}
-
 // memBlock is an in-memory block that implements a subset of the tsdb.BlockReader interface
 // to allow tsdb.StreamedBlockWriter to persist the data as a block.
 type memBlock struct {
