@@ -1251,19 +1251,6 @@ OUTER:
 			continue
 		}
 
-		for _, matcher := range b.lazyPostings.matchers {
-			val := b.lset.Get(matcher.Name)
-			if !matcher.Matches(val) {
-				// Series not matched means series we overfetched due to lazy posting expansion.
-				seriesBytes := b.indexr.loadedSeries[postingsBatch[i]]
-				b.lazyExpandedPostingSeriesOverfetchedSizeBytes.Add(float64(len(seriesBytes)))
-				continue OUTER
-			}
-		}
-		if b.lazyPostings.lazyExpanded() {
-			b.expandedPostings = append(b.expandedPostings, postingsBatch[i])
-		}
-
 		completeLabelset := labelpb.ExtendSortedLabels(b.lset, b.extLset)
 		if b.extLsetToRemove != nil {
 			completeLabelset = rmLabels(completeLabelset, b.extLsetToRemove)

@@ -593,9 +593,6 @@ func (s *ProxyStore) LabelValues(ctx context.Context, r *storepb.LabelValuesRequ
 	gctx = metadata.AppendToOutgoingContext(gctx, tenancy.DefaultTenantHeader, tenant)
 	level.Debug(s.logger).Log("msg", "Tenant info in LabelValues()", "tenant", tenant)
 
-	gctx = metadata.AppendToOutgoingContext(gctx, tenancy.DefaultTenantHeader, tenant)
-	level.Debug(s.logger).Log("msg", "Tenant info in LabelValues()", "tenant", tenant)
-
 	for _, st := range s.stores() {
 		st := st
 
