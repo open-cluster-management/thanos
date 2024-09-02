@@ -272,7 +272,7 @@ func (t *tenant) store() *store.TSDBStore {
 	return t.storeTSDB
 }
 
-func (t *tenant) client(logger log.Logger) store.Client {
+func (t *tenant) client() store.Client {
 	t.mtx.RLock()
 	defer t.mtx.RUnlock()
 

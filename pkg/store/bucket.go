@@ -1072,11 +1072,6 @@ func newBlockSeriesClient(
 		extLset = rmLabels(extLset.Copy(), extLsetToRemove)
 	}
 
-	extLset := b.extLset
-	if extLsetToRemove != nil {
-		extLset = rmLabels(extLset.Copy(), extLsetToRemove)
-	}
-
 	return &blockSeriesClient{
 		ctx:             ctx,
 		logger:          logger,
@@ -2963,7 +2958,6 @@ func (r *bucketIndexReader) fetchPostings(ctx context.Context, keys []labels.Lab
 		if err := bytesLimiter.ReserveWithType(uint64(len(dataFromCache)), PostingsTouched); err != nil {
 			return nil, closeFns, httpgrpc.Errorf(int(codes.ResourceExhausted), "exceeded bytes limit while loading postings from index cache: %s", err)
 		}
-		r.stats.DataDownloadedSizeSum += units.Base2Bytes(len(dataFromCache))
 	}
 
 	// Iterate over all groups and fetch posting from cache.
@@ -3019,7 +3013,6 @@ func (r *bucketIndexReader) fetchPostings(ctx context.Context, keys []labels.Lab
 		if err := bytesLimiter.ReserveWithType(uint64(length), PostingsFetched); err != nil {
 			return nil, closeFns, httpgrpc.Errorf(int(codes.ResourceExhausted), "exceeded bytes limit while fetching postings: %s", err)
 		}
-		r.stats.DataDownloadedSizeSum += units.Base2Bytes(length)
 	}
 
 	g, ctx := errgroup.WithContext(ctx)
@@ -3195,7 +3188,6 @@ func (r *bucketIndexReader) PreloadSeries(ctx context.Context, ids []storage.Ser
 		if err := bytesLimiter.ReserveWithType(uint64(len(b)), SeriesTouched); err != nil {
 			return httpgrpc.Errorf(int(codes.ResourceExhausted), "exceeded bytes limit while loading series from index cache: %s", err)
 		}
-		r.stats.DataDownloadedSizeSum += units.Base2Bytes(len(b))
 	}
 
 	parts := r.block.partitioner.Partition(len(ids), func(i int) (start, end uint64) {
@@ -3526,7 +3518,6 @@ func (r *bucketChunkReader) load(ctx context.Context, res []seriesEntry, aggrs [
 			if err := bytesLimiter.ReserveWithType(uint64(p.End-p.Start), ChunksFetched); err != nil {
 				return httpgrpc.Errorf(int(codes.ResourceExhausted), "exceeded bytes limit while fetching chunks: %s", err)
 			}
-			r.stats.DataDownloadedSizeSum += units.Base2Bytes(p.End - p.Start)
 		}
 
 		for _, p := range parts {
