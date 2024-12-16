@@ -83,89 +83,7 @@ func (es *endpointRef) Metadata(ctx context.Context, infoClient infopb.InfoClien
 			return &endpointMetadata{resp}, nil
 		}
 	}
-
-	// Call Info method of StoreAPI, this way querier will be able to discovery old components not exposing InfoAPI.
-	if storeClient != nil {
-		metadata, err := es.getMetadataUsingStoreAPI(ctx, storeClient)
-		if err != nil {
-			return nil, errors.Wrapf(err, "fallback fetching info from %s", es.addr)
-		}
-		return metadata, nil
-	}
-
 	return nil, errors.New(noMetadataEndpointMessage)
-}
-
-func (es *endpointRef) getMetadataUsingStoreAPI(ctx context.Context, client storepb.StoreClient) (*endpointMetadata, error) {
-	resp, err := client.Info(ctx, &storepb.InfoRequest{})
-	if err != nil {
-		return nil, err
-	}
-
-	infoResp := fillExpectedAPIs(component.FromProto(resp.StoreType), resp.MinTime, resp.MaxTime)
-	infoResp.LabelSets = resp.LabelSets
-	infoResp.ComponentType = component.FromProto(resp.StoreType).String()
-
-	return &endpointMetadata{
-		&infoResp,
-	}, nil
-}
-
-func fillExpectedAPIs(componentType component.Component, mintime, maxTime int64) infopb.InfoResponse {
-	switch componentType {
-	case component.Sidecar:
-		return infopb.InfoResponse{
-			Store: &infopb.StoreInfo{
-				MinTime: mintime,
-				MaxTime: maxTime,
-			},
-			Rules:          &infopb.RulesInfo{},
-			Targets:        &infopb.TargetsInfo{},
-			MetricMetadata: &infopb.MetricMetadataInfo{},
-			Exemplars:      &infopb.ExemplarsInfo{},
-		}
-	case component.Query:
-		{
-			return infopb.InfoResponse{
-				Store: &infopb.StoreInfo{
-					MinTime: mintime,
-					MaxTime: maxTime,
-				},
-				Rules:          &infopb.RulesInfo{},
-				Targets:        &infopb.TargetsInfo{},
-				MetricMetadata: &infopb.MetricMetadataInfo{},
-				Exemplars:      &infopb.ExemplarsInfo{},
-				Query:          &infopb.QueryAPIInfo{},
-			}
-		}
-	case component.Receive:
-		{
-			return infopb.InfoResponse{
-				Store: &infopb.StoreInfo{
-					MinTime: mintime,
-					MaxTime: maxTime,
-				},
-				Exemplars: &infopb.ExemplarsInfo{},
-			}
-		}
-	case component.Store:
-		return infopb.InfoResponse{
-			Store: &infopb.StoreInfo{
-				MinTime: mintime,
-				MaxTime: maxTime,
-			},
-		}
-	case component.Rule:
-		return infopb.InfoResponse{
-			Store: &infopb.StoreInfo{
-				MinTime: mintime,
-				MaxTime: maxTime,
-			},
-			Rules: &infopb.RulesInfo{},
-		}
-	default:
-		return infopb.InfoResponse{}
-	}
 }
 
 // stringError forces the error to be a string
@@ -199,19 +117,21 @@ type EndpointStatus struct {
 // TODO(hitanshu-mehta) Currently,only collecting metrics of storeEndpoints. Make this struct generic.
 type endpointSetNodeCollector struct {
 	mtx             sync.Mutex
-	storeNodes      map[component.Component]map[string]int
+	storeNodes      map[string]map[string]int
 	storePerExtLset map[string]int
 
+	logger          log.Logger
 	connectionsDesc *prometheus.Desc
 	labels          []string
 }
 
-func newEndpointSetNodeCollector(labels ...string) *endpointSetNodeCollector {
+func newEndpointSetNodeCollector(logger log.Logger, labels ...string) *endpointSetNodeCollector {
 	if len(labels) == 0 {
 		labels = []string{string(ExternalLabels), string(StoreType)}
 	}
 	return &endpointSetNodeCollector{
-		storeNodes: map[component.Component]map[string]int{},
+		logger:     logger,
+		storeNodes: map[string]map[string]int{},
 		connectionsDesc: prometheus.NewDesc(
 			"thanos_store_nodes_grpc_connections",
 			"Number of gRPC connection to Store APIs. Opened connection means healthy store APIs available for Querier.",
@@ -234,8 +154,8 @@ func truncateExtLabels(s string, threshold int) string {
 	}
 	return s
 }
-func (c *endpointSetNodeCollector) Update(nodes map[component.Component]map[string]int) {
-	storeNodes := make(map[component.Component]map[string]int, len(nodes))
+func (c *endpointSetNodeCollector) Update(nodes map[string]map[string]int) {
+	storeNodes := make(map[string]map[string]int, len(nodes))
 	storePerExtLset := map[string]int{}
 
 	for storeType, occurrencesPerExtLset := range nodes {
@@ -261,12 +181,8 @@ func (c *endpointSetNodeCollector) Collect(ch chan<- prometheus.Metric) {
 	c.mtx.Lock()
 	defer c.mtx.Unlock()
 
-	for storeType, occurrencesPerExtLset := range c.storeNodes {
+	for k, occurrencesPerExtLset := range c.storeNodes {
 		for externalLabels, occurrences := range occurrencesPerExtLset {
-			var storeTypeStr string
-			if storeType != nil {
-				storeTypeStr = storeType.String()
-			}
 			// Select only required labels.
 			lbls := []string{}
 			for _, lbl := range c.labels {
@@ -274,10 +190,15 @@ func (c *endpointSetNodeCollector) Collect(ch chan<- prometheus.Metric) {
 				case string(ExternalLabels):
 					lbls = append(lbls, externalLabels)
 				case string(StoreType):
-					lbls = append(lbls, storeTypeStr)
+					lbls = append(lbls, k)
 				}
 			}
-			ch <- prometheus.MustNewConstMetric(c.connectionsDesc, prometheus.GaugeValue, float64(occurrences), lbls...)
+			select {
+			case ch <- prometheus.MustNewConstMetric(c.connectionsDesc, prometheus.GaugeValue, float64(occurrences), lbls...):
+			case <-time.After(1 * time.Second):
+				level.Warn(c.logger).Log("msg", "failed to collect endpointset metrics", "timeout", 1*time.Second)
+				return
+			}
 		}
 	}
 }
@@ -319,7 +240,7 @@ func NewEndpointSet(
 	endpointInfoTimeout time.Duration,
 	endpointMetricLabels ...string,
 ) *EndpointSet {
-	endpointsMetric := newEndpointSetNodeCollector(endpointMetricLabels...)
+	endpointsMetric := newEndpointSetNodeCollector(logger, endpointMetricLabels...)
 	if reg != nil {
 		reg.MustRegister(endpointsMetric)
 	}
@@ -391,8 +312,7 @@ func (e *EndpointSet) Update(ctx context.Context) {
 			defer wg.Done()
 			ctx, cancel := context.WithTimeout(ctx, e.endpointInfoTimeout)
 			defer cancel()
-
-			newRef, err := e.newEndpointRef(ctx, spec)
+			newRef, err := e.newEndpointRef(spec)
 			if err != nil {
 				level.Warn(e.logger).Log("msg", "new endpoint creation failed", "err", err, "address", spec.Addr())
 				return
@@ -448,12 +368,12 @@ func (e *EndpointSet) Update(ctx context.Context) {
 
 		// All producers that expose StoreAPI should have unique external labels. Check all which connect to our Querier.
 		if er.HasStoreAPI() && (er.ComponentType() == component.Sidecar || er.ComponentType() == component.Rule) &&
-			stats[component.Sidecar][extLset]+stats[component.Rule][extLset] > 0 {
+			stats[component.Sidecar.String()][extLset]+stats[component.Rule.String()][extLset] > 0 {
 
 			level.Warn(e.logger).Log("msg", "found duplicate storeEndpoints producer (sidecar or ruler). This is not advices as it will malform data in in the same bucket",
-				"address", addr, "extLset", extLset, "duplicates", fmt.Sprintf("%v", stats[component.Sidecar][extLset]+stats[component.Rule][extLset]+1))
+				"address", addr, "extLset", extLset, "duplicates", fmt.Sprintf("%v", stats[component.Sidecar.String()][extLset]+stats[component.Rule.String()][extLset]+1))
 		}
-		stats[er.ComponentType()][extLset]++
+		stats[er.ComponentType().String()][extLset]++
 	}
 
 	e.endpointsMetric.Update(stats)
@@ -525,6 +445,7 @@ func (e *EndpointSet) GetStoreClients() []store.Client {
 				StoreClient: storepb.NewStoreClient(er.cc),
 				addr:        er.addr,
 				metadata:    er.metadata,
+				status:      er.status,
 			})
 			er.mtx.RUnlock()
 		}
@@ -649,17 +570,12 @@ type endpointRef struct {
 
 // newEndpointRef creates a new endpointRef with a gRPC channel to the given the IP address.
 // The call to newEndpointRef will return an error if establishing the channel fails.
-func (e *EndpointSet) newEndpointRef(ctx context.Context, spec *GRPCEndpointSpec) (*endpointRef, error) {
+func (e *EndpointSet) newEndpointRef(spec *GRPCEndpointSpec) (*endpointRef, error) {
 	var dialOpts []grpc.DialOption
 
 	dialOpts = append(dialOpts, e.dialOpts...)
 	dialOpts = append(dialOpts, spec.dialOpts...)
-	// By default DialContext is non-blocking which means that any connection
-	// failure won't be reported/logged. Instead block until the connection is
-	// successfully established and return the details of the connection error
-	// if any.
-	dialOpts = append(dialOpts, grpc.WithReturnConnectionError())
-	conn, err := grpc.DialContext(ctx, spec.Addr(), dialOpts...)
+	conn, err := grpc.NewClient(spec.Addr(), dialOpts...)
 	if err != nil {
 		return nil, errors.Wrap(err, "dialing connection")
 	}
@@ -715,7 +631,7 @@ func (er *endpointRef) updateMetadata(metadata *endpointMetadata, err error) {
 }
 
 // isQueryable returns true if an endpointRef should be used for querying.
-// A strict endpointRef is always queriable. A non-strict endpointRef
+// A strict endpointRef is always queryable. A non-strict endpointRef
 // is queryable if the last health check (info call) succeeded.
 func (er *endpointRef) isQueryable() bool {
 	er.mtx.RLock()
@@ -785,7 +701,7 @@ func (er *endpointRef) LabelSets() []labels.Labels {
 	er.mtx.RLock()
 	defer er.mtx.RUnlock()
 
-	return er.labelSets()
+	return er.status.LabelSets
 }
 
 func (er *endpointRef) labelSets() []labels.Labels {
@@ -795,11 +711,7 @@ func (er *endpointRef) labelSets() []labels.Labels {
 
 	labelSet := make([]labels.Labels, 0, len(er.metadata.LabelSets))
 	for _, ls := range labelpb.ZLabelSetsToPromLabelSets(er.metadata.LabelSets...) {
-		if len(ls) == 0 {
-			continue
-		}
-		// Compatibility label for Queriers pre 0.8.1. Filter it out now.
-		if ls[0].Name == store.CompatibilityTypeLabelName {
+		if ls.Len() == 0 {
 			continue
 		}
 		labelSet = append(labelSet, ls.Copy())
@@ -870,7 +782,7 @@ func (er *endpointRef) Addr() (string, bool) {
 }
 
 func (er *endpointRef) Close() {
-	runutil.CloseWithLogOnErr(er.logger, er.cc, fmt.Sprintf("endpoint %v connection closed", er.addr))
+	runutil.CloseWithLogOnErr(er.logger, er.cc, "endpoint %v connection closed", er.addr)
 }
 
 func (er *endpointRef) apisPresent() []string {
@@ -903,14 +815,18 @@ func (er *endpointRef) apisPresent() []string {
 	return apisPresent
 }
 
+func (er *endpointRef) Matches(matchers []*labels.Matcher) bool {
+	return true
+}
+
 type endpointMetadata struct {
 	*infopb.InfoResponse
 }
 
-func newEndpointAPIStats() map[component.Component]map[string]int {
-	nodes := make(map[component.Component]map[string]int, len(storepb.StoreType_name))
-	for i := range storepb.StoreType_name {
-		nodes[component.FromProto(storepb.StoreType(i))] = map[string]int{}
+func newEndpointAPIStats() map[string]map[string]int {
+	nodes := make(map[string]map[string]int, len(component.All))
+	for _, comp := range component.All {
+		nodes[comp.String()] = map[string]int{}
 	}
 	return nodes
 }

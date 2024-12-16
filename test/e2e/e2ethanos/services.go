@@ -196,7 +196,7 @@ func NewAvalanche(e e2e.Environment, name string, o AvalancheOptions) *e2eobs.Ob
 	})
 
 	return e2eobs.AsObservable(f.Init(wrapWithDefaults(e2e.StartOptions{
-		Image:   "quay.io/prometheuscommunity/avalanche:main",
+		Image:   "quay.io/prometheuscommunity/avalanche:v0.5.0",
 		Command: e2e.NewCommandWithoutEntrypoint("avalanche", args...),
 	})), "http")
 }
@@ -510,6 +510,9 @@ func (q *QuerierBuilder) collectArgs() ([]string, error) {
 	if q.enableXFunctions {
 		args = append(args, "--query.enable-x-functions")
 	}
+	if q.queryMode != "" {
+		args = append(args, "--query.mode="+q.queryMode)
+	}
 	if q.engine != "" {
 		args = append(args, "--query.promql-engine="+string(q.engine))
 	}
@@ -536,6 +539,7 @@ type ReceiveBuilder struct {
 	f e2e.FutureRunnable
 
 	maxExemplars        int
+	capnp               bool
 	ingestion           bool
 	limit               int
 	tenantsLimits       receive.TenantsWriteLimitsConfig
@@ -552,7 +556,7 @@ type ReceiveBuilder struct {
 
 func NewReceiveBuilder(e e2e.Environment, name string) *ReceiveBuilder {
 	f := e.Runnable(fmt.Sprintf("receive-%v", name)).
-		WithPorts(map[string]int{"http": 8080, "grpc": 9091, "remote-write": 8081}).
+		WithPorts(map[string]int{"http": 8080, "grpc": 9091, "remote-write": 8081, "capnp": 19391}).
 		Future()
 	return &ReceiveBuilder{
 		Linkable:    f,
@@ -580,6 +584,11 @@ func (r *ReceiveBuilder) WithIngestionEnabled() *ReceiveBuilder {
 
 func (r *ReceiveBuilder) WithLabel(name, value string) *ReceiveBuilder {
 	r.labels = append(r.labels, fmt.Sprintf(`%s="%s"`, name, value))
+	return r
+}
+
+func (r *ReceiveBuilder) UseCapnpReplication() *ReceiveBuilder {
+	r.capnp = true
 	return r
 }
 
@@ -643,6 +652,10 @@ func (r *ReceiveBuilder) Init() *e2eobs.Observable {
 		args["--label"] = fmt.Sprintf("%s,%s", args["--label"], strings.Join(r.labels, ","))
 	}
 
+	if r.capnp {
+		args["--receive.replication-protocol"] = "capnproto"
+	}
+
 	hashring := r.hashringConfigs
 	if len(hashring) > 0 && r.ingestion {
 		args["--receive.local-endpoint"] = r.InternalEndpoint("grpc")
@@ -671,7 +684,7 @@ func (r *ReceiveBuilder) Init() *e2eobs.Observable {
 		}
 
 		if err := os.WriteFile(filepath.Join(r.Dir(), "limits.yaml"), b, 0600); err != nil {
-			return &e2eobs.Observable{Runnable: e2e.NewFailedRunnable(r.Name(), errors.Wrap(err, "creating limitin config"))}
+			return &e2eobs.Observable{Runnable: e2e.NewFailedRunnable(r.Name(), errors.Wrap(err, "creating limiting config"))}
 		}
 
 		args["--receive.limits-config-file"] = filepath.Join(r.InternalDir(), "limits.yaml")
@@ -1235,4 +1248,34 @@ func NewRedis(e e2e.Environment, name string) e2e.Runnable {
 			WaitReadyBackoff: &defaultBackoffConfig,
 		},
 	)
+}
+
+func NewToolsBucketDownsample(e e2e.Environment, name string, bucketConfig client.BucketConfig) *e2eobs.Observable {
+	f := e.Runnable(fmt.Sprintf("downsampler-%s", name)).
+		WithPorts(map[string]int{"http": 8080}).
+		Future()
+
+	bktConfigBytes, err := yaml.Marshal(bucketConfig)
+	if err != nil {
+		return &e2eobs.Observable{Runnable: e2e.NewFailedRunnable(name, errors.Wrapf(err, "generate store config file: %v", bucketConfig))}
+	}
+
+	args := []string{"bucket", "downsample"}
+
+	args = append(args, e2e.BuildArgs(map[string]string{
+		"--http-address":    ":8080",
+		"--log.level":       "debug",
+		"--objstore.config": string(bktConfigBytes),
+		"--data-dir":        f.InternalDir(),
+	})...)
+
+	return e2eobs.AsObservable(f.Init(
+		e2e.StartOptions{
+			Image:            DefaultImage(),
+			Command:          e2e.NewCommand("tools", args...),
+			User:             strconv.Itoa(os.Getuid()),
+			Readiness:        e2e.NewHTTPReadinessProbe("http", "/-/ready", 200, 200),
+			WaitReadyBackoff: &defaultBackoffConfig,
+		},
+	), "http")
 }
