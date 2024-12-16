@@ -52,6 +52,7 @@ import (
 	"github.com/thanos-io/thanos/pkg/exemplars"
 	"github.com/thanos-io/thanos/pkg/exemplars/exemplarspb"
 	extpromhttp "github.com/thanos-io/thanos/pkg/extprom/http"
+	"github.com/thanos-io/thanos/pkg/extpromql"
 	"github.com/thanos-io/thanos/pkg/gate"
 	"github.com/thanos-io/thanos/pkg/logging"
 	"github.com/thanos-io/thanos/pkg/metadata"
@@ -81,6 +82,9 @@ const (
 	LookbackDeltaParam       = "lookback_delta"
 	EngineParam              = "engine"
 	QueryAnalyzeParam        = "analyze"
+	RuleNameParam            = "rule_name[]"
+	RuleGroupParam           = "rule_group[]"
+	FileParam                = "file[]"
 )
 
 type PromqlEngineType string
@@ -121,13 +125,19 @@ func (f *QueryEngineFactory) GetPrometheusEngine() promql.QueryEngine {
 
 func (f *QueryEngineFactory) GetThanosEngine() ThanosEngine {
 	f.createThanosEngine.Do(func() {
+		opts := engine.Opts{
+			EngineOpts:       f.engineOpts,
+			Engine:           f.GetPrometheusEngine(),
+			EnableAnalysis:   true,
+			EnableXFunctions: f.enableXFunctions,
+		}
 		if f.thanosEngine != nil {
 			return
 		}
 		if f.remoteEngineEndpoints == nil {
-			f.thanosEngine = engine.New(engine.Opts{EngineOpts: f.engineOpts, Engine: f.GetPrometheusEngine(), EnableAnalysis: true, EnableXFunctions: f.enableXFunctions})
+			f.thanosEngine = engine.New(opts)
 		} else {
-			f.thanosEngine = engine.NewDistributedEngine(engine.Opts{EngineOpts: f.engineOpts, Engine: f.GetPrometheusEngine(), EnableAnalysis: true}, f.remoteEngineEndpoints)
+			f.thanosEngine = engine.NewDistributedEngine(opts, f.remoteEngineEndpoints)
 		}
 	})
 
@@ -368,7 +378,7 @@ func (qapi *QueryAPI) parseStoreDebugMatchersParam(r *http.Request) (storeMatche
 	}
 
 	for _, s := range r.Form[StoreMatcherParam] {
-		matchers, err := parser.ParseMetricSelector(s)
+		matchers, err := extpromql.ParseMetricSelector(s)
 		if err != nil {
 			return nil, &api.ApiError{Typ: api.ErrorBadData, Err: err}
 		}
@@ -484,7 +494,7 @@ func processAnalysis(a *engine.AnalyzeOutputNode) queryTelemetry {
 	analysis.PeakSamples = a.PeakSamples()
 	analysis.TotalSamples = a.TotalSamples()
 	for _, c := range a.Children {
-		analysis.Children = append(analysis.Children, processAnalysis(&c))
+		analysis.Children = append(analysis.Children, processAnalysis(c))
 	}
 	return analysis
 }
@@ -661,45 +671,48 @@ func (qapi *QueryAPI) query(r *http.Request) (interface{}, []error, *api.ApiErro
 		return nil, nil, &api.ApiError{Typ: api.ErrorBadData, Err: err}, func() {}
 	}
 
-	// We are starting promQL tracing span here, because we have no control over promQL code.
-	span, ctx := tracing.StartSpan(ctx, "promql_instant_query")
-	defer span.Finish()
-
-	var seriesStats []storepb.SeriesStatsCounter
-	qry, err := engine.NewInstantQuery(
-		ctx,
-		qapi.queryableCreate(
-			enableDedup,
-			replicaLabels,
-			storeDebugMatchers,
-			maxSourceResolution,
-			enablePartialResponse,
-			false,
-			shardInfo,
-			query.NewAggregateStatsReporter(&seriesStats),
-		),
-		promql.NewPrometheusQueryOpts(false, lookbackDelta),
-		queryStr,
-		ts,
+	var (
+		qry         promql.Query
+		seriesStats []storepb.SeriesStatsCounter
 	)
-
-	if err != nil {
+	if err := tracing.DoInSpanWithErr(ctx, "instant_query_create", func(ctx context.Context) error {
+		var err error
+		qry, err = engine.NewInstantQuery(
+			ctx,
+			qapi.queryableCreate(
+				enableDedup,
+				replicaLabels,
+				storeDebugMatchers,
+				maxSourceResolution,
+				enablePartialResponse,
+				false,
+				shardInfo,
+				query.NewAggregateStatsReporter(&seriesStats),
+			),
+			promql.NewPrometheusQueryOpts(false, lookbackDelta),
+			queryStr,
+			ts,
+		)
+		return err
+	}); err != nil {
 		return nil, nil, &api.ApiError{Typ: api.ErrorBadData, Err: err}, func() {}
 	}
-	res := qry.Exec(ctx)
+
 	analysis, err := qapi.parseQueryAnalyzeParam(r, qry)
 	if err != nil {
 		return nil, nil, apiErr, func() {}
 	}
 
-	tracing.DoInSpan(ctx, "query_gate_ismyturn", func(ctx context.Context) {
-		err = qapi.gate.Start(ctx)
-	})
-	if err != nil {
+	if err := tracing.DoInSpanWithErr(ctx, "query_gate_ismyturn", qapi.gate.Start); err != nil {
 		return nil, nil, &api.ApiError{Typ: api.ErrorExec, Err: err}, qry.Close
 	}
 	defer qapi.gate.Done()
 	beforeRange := time.Now()
+
+	var res *promql.Result
+	tracing.DoInSpan(ctx, "instant_query_exec", func(ctx context.Context) {
+		res = qry.Exec(ctx)
+	})
 	if res.Err != nil {
 		switch res.Err.(type) {
 		case promql.ErrQueryCanceled:
@@ -959,48 +972,49 @@ func (qapi *QueryAPI) queryRange(r *http.Request) (interface{}, []error, *api.Ap
 	// Record the query range requested.
 	qapi.queryRangeHist.Observe(end.Sub(start).Seconds())
 
-	// We are starting promQL tracing span here, because we have no control over promQL code.
-	span, ctx := tracing.StartSpan(ctx, "promql_range_query")
-	defer span.Finish()
-
-	var seriesStats []storepb.SeriesStatsCounter
-	qry, err := engine.NewRangeQuery(
-		ctx,
-		qapi.queryableCreate(
-			enableDedup,
-			replicaLabels,
-			storeDebugMatchers,
-			maxSourceResolution,
-			enablePartialResponse,
-			false,
-			shardInfo,
-			query.NewAggregateStatsReporter(&seriesStats),
-		),
-		promql.NewPrometheusQueryOpts(false, lookbackDelta),
-		queryStr,
-		start,
-		end,
-		step,
+	var (
+		qry         promql.Query
+		seriesStats []storepb.SeriesStatsCounter
 	)
-	if err != nil {
+	if err := tracing.DoInSpanWithErr(ctx, "range_query_create", func(ctx context.Context) error {
+		var err error
+		qry, err = engine.NewRangeQuery(
+			ctx,
+			qapi.queryableCreate(
+				enableDedup,
+				replicaLabels,
+				storeDebugMatchers,
+				maxSourceResolution,
+				enablePartialResponse,
+				false,
+				shardInfo,
+				query.NewAggregateStatsReporter(&seriesStats),
+			),
+			promql.NewPrometheusQueryOpts(false, lookbackDelta),
+			queryStr,
+			start,
+			end,
+			step,
+		)
+		return err
+	}); err != nil {
 		return nil, nil, &api.ApiError{Typ: api.ErrorBadData, Err: err}, func() {}
 	}
-
-	res := qry.Exec(ctx)
-
 	analysis, err := qapi.parseQueryAnalyzeParam(r, qry)
 	if err != nil {
 		return nil, nil, apiErr, func() {}
 	}
 
-	tracing.DoInSpan(ctx, "query_gate_ismyturn", func(ctx context.Context) {
-		err = qapi.gate.Start(ctx)
-	})
-	if err != nil {
+	if err := tracing.DoInSpanWithErr(ctx, "query_gate_ismyturn", qapi.gate.Start); err != nil {
 		return nil, nil, &api.ApiError{Typ: api.ErrorExec, Err: err}, qry.Close
 	}
 	defer qapi.gate.Done()
 
+	var res *promql.Result
+	tracing.DoInSpan(ctx, "range_query_exec", func(ctx context.Context) {
+		res = qry.Exec(ctx)
+
+	})
 	beforeRange := time.Now()
 	if res.Err != nil {
 		switch res.Err.(type) {
@@ -1053,6 +1067,11 @@ func (qapi *QueryAPI) labelValues(r *http.Request) (interface{}, []error, *api.A
 		return nil, nil, apiErr, func() {}
 	}
 
+	limit, err := parseLimitParam(r.FormValue("limit"))
+	if err != nil {
+		return nil, nil, &api.ApiError{Typ: api.ErrorBadData, Err: err}, func() {}
+	}
+
 	matcherSets, ctx, err := tenancy.RewriteLabelMatchers(ctx, r, qapi.tenantHeader, qapi.defaultTenant, qapi.tenantCertField, qapi.enforceTenancy, qapi.tenantLabel, r.Form[MatcherParam])
 	if err != nil {
 		apiErr = &api.ApiError{Typ: api.ErrorBadData, Err: err}
@@ -1074,6 +1093,10 @@ func (qapi *QueryAPI) labelValues(r *http.Request) (interface{}, []error, *api.A
 	}
 	defer runutil.CloseWithLogOnErr(qapi.logger, q, "queryable labelValues")
 
+	hints := &storage.LabelHints{
+		Limit: toHintLimit(limit),
+	}
+
 	var (
 		vals     []string
 		warnings annotations.Annotations
@@ -1082,7 +1105,7 @@ func (qapi *QueryAPI) labelValues(r *http.Request) (interface{}, []error, *api.A
 		var callWarnings annotations.Annotations
 		labelValuesSet := make(map[string]struct{})
 		for _, matchers := range matcherSets {
-			vals, callWarnings, err = q.LabelValues(ctx, name, matchers...)
+			vals, callWarnings, err = q.LabelValues(ctx, name, hints, matchers...)
 			if err != nil {
 				return nil, nil, &api.ApiError{Typ: api.ErrorExec, Err: err}, func() {}
 			}
@@ -1098,7 +1121,7 @@ func (qapi *QueryAPI) labelValues(r *http.Request) (interface{}, []error, *api.A
 		}
 		sort.Strings(vals)
 	} else {
-		vals, warnings, err = q.LabelValues(ctx, name)
+		vals, warnings, err = q.LabelValues(ctx, name, hints)
 		if err != nil {
 			return nil, nil, &api.ApiError{Typ: api.ErrorExec, Err: err}, func() {}
 		}
@@ -1106,6 +1129,11 @@ func (qapi *QueryAPI) labelValues(r *http.Request) (interface{}, []error, *api.A
 
 	if vals == nil {
 		vals = make([]string, 0)
+	}
+
+	if limit > 0 && len(vals) > limit {
+		vals = vals[:limit]
+		warnings = warnings.Add(errors.New("results truncated due to limit"))
 	}
 
 	return vals, warnings.AsErrors(), nil, func() {}
@@ -1146,6 +1174,11 @@ func (qapi *QueryAPI) series(r *http.Request) (interface{}, []error, *api.ApiErr
 		return nil, nil, apiErr, func() {}
 	}
 
+	limit, err := parseLimitParam(r.FormValue("limit"))
+	if err != nil {
+		return nil, nil, &api.ApiError{Typ: api.ErrorBadData, Err: err}, func() {}
+	}
+
 	enablePartialResponse, apiErr := qapi.parsePartialResponseParam(r, qapi.enableQueryPartialResponse)
 	if apiErr != nil {
 		return nil, nil, apiErr, func() {}
@@ -1171,18 +1204,31 @@ func (qapi *QueryAPI) series(r *http.Request) (interface{}, []error, *api.ApiErr
 		metrics = []labels.Labels{}
 		sets    []storage.SeriesSet
 	)
+
+	hints := &storage.SelectHints{
+		Limit: toHintLimit(limit),
+		Start: start.UnixMilli(),
+		End:   end.UnixMilli(),
+	}
+
 	for _, mset := range matcherSets {
-		sets = append(sets, q.Select(ctx, false, nil, mset...))
+		sets = append(sets, q.Select(ctx, false, hints, mset...))
 	}
 
 	set := storage.NewMergeSeriesSet(sets, storage.ChainedSeriesMerge)
+	warnings := set.Warnings()
 	for set.Next() {
 		metrics = append(metrics, set.At().Labels())
+		if limit > 0 && len(metrics) > limit {
+			metrics = metrics[:limit]
+			warnings.Add(errors.New("results truncated due to limit"))
+			return metrics, warnings.AsErrors(), nil, func() {}
+		}
 	}
 	if set.Err() != nil {
 		return nil, nil, &api.ApiError{Typ: api.ErrorExec, Err: set.Err()}, func() {}
 	}
-	return metrics, set.Warnings().AsErrors(), nil, func() {}
+	return metrics, warnings.AsErrors(), nil, func() {}
 }
 
 func (qapi *QueryAPI) labelNames(r *http.Request) (interface{}, []error, *api.ApiError, func()) {
@@ -1199,6 +1245,11 @@ func (qapi *QueryAPI) labelNames(r *http.Request) (interface{}, []error, *api.Ap
 	storeDebugMatchers, apiErr := qapi.parseStoreDebugMatchersParam(r)
 	if apiErr != nil {
 		return nil, nil, apiErr, func() {}
+	}
+
+	limit, err := parseLimitParam(r.FormValue("limit"))
+	if err != nil {
+		return nil, nil, &api.ApiError{Typ: api.ErrorBadData, Err: err}, func() {}
 	}
 
 	matcherSets, ctx, err := tenancy.RewriteLabelMatchers(r.Context(), r, qapi.tenantHeader, qapi.defaultTenant, qapi.tenantCertField, qapi.enforceTenancy, qapi.tenantLabel, r.Form[MatcherParam])
@@ -1227,11 +1278,15 @@ func (qapi *QueryAPI) labelNames(r *http.Request) (interface{}, []error, *api.Ap
 		warnings annotations.Annotations
 	)
 
+	hints := &storage.LabelHints{
+		Limit: toHintLimit(limit),
+	}
+
 	if len(matcherSets) > 0 {
 		var callWarnings annotations.Annotations
 		labelNamesSet := make(map[string]struct{})
 		for _, matchers := range matcherSets {
-			names, callWarnings, err = q.LabelNames(ctx, matchers...)
+			names, callWarnings, err = q.LabelNames(ctx, hints, matchers...)
 			if err != nil {
 				return nil, nil, &api.ApiError{Typ: api.ErrorExec, Err: err}, func() {}
 			}
@@ -1247,7 +1302,7 @@ func (qapi *QueryAPI) labelNames(r *http.Request) (interface{}, []error, *api.Ap
 		}
 		sort.Strings(names)
 	} else {
-		names, warnings, err = q.LabelNames(ctx)
+		names, warnings, err = q.LabelNames(ctx, hints)
 	}
 
 	if err != nil {
@@ -1255,6 +1310,11 @@ func (qapi *QueryAPI) labelNames(r *http.Request) (interface{}, []error, *api.Ap
 	}
 	if names == nil {
 		names = make([]string, 0)
+	}
+
+	if limit > 0 && len(names) > limit {
+		names = names[:limit]
+		warnings = warnings.Add(errors.New("results truncated due to limit"))
 	}
 
 	return names, warnings.AsErrors(), nil, func() {}
@@ -1386,6 +1446,9 @@ func NewRulesHandler(client rules.UnaryClient, enablePartialResponse bool) func(
 			Type:                    rulespb.RulesRequest_Type(typ),
 			PartialResponseStrategy: ps,
 			MatcherString:           r.Form[MatcherParam],
+			RuleName:                r.Form[RuleNameParam],
+			RuleGroup:               r.Form[RuleGroupParam],
+			File:                    r.Form[FileParam],
 		}
 		tracing.DoInSpan(ctx, "retrieve_rules", func(ctx context.Context) {
 			groups, warnings, err = client.Rules(ctx, req)
@@ -1513,6 +1576,33 @@ func parseDuration(s string) (time.Duration, error) {
 		return time.Duration(d), nil
 	}
 	return 0, errors.Errorf("cannot parse %q to a valid duration", s)
+}
+
+// parseLimitParam returning 0 means no limit is to be applied.
+func parseLimitParam(s string) (int, error) {
+	if s == "" {
+		return 0, nil
+	}
+
+	limit, err := strconv.Atoi(s)
+	if err != nil {
+		return 0, errors.Errorf("cannot parse %q to a valid limit", s)
+	}
+	if limit < 0 {
+		return 0, errors.New("limit must be non-negative")
+	}
+
+	return limit, nil
+}
+
+// toHintLimit increases the API limit, as returned by parseLimitParam, by 1.
+// This allows for emitting warnings when the results are truncated.
+func toHintLimit(limit int) int {
+	// 0 means no limit and avoid int overflow
+	if limit > 0 && limit < math.MaxInt {
+		return limit + 1
+	}
+	return limit
 }
 
 // NewMetricMetadataHandler creates handler compatible with HTTP /api/v1/metadata https://prometheus.io/docs/prometheus/latest/querying/api/#querying-metric-metadata

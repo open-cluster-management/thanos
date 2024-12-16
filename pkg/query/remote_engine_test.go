@@ -14,17 +14,19 @@ import (
 	"github.com/go-kit/log"
 	"github.com/pkg/errors"
 	"github.com/prometheus/prometheus/model/labels"
-	"github.com/prometheus/prometheus/promql/parser"
 	"github.com/thanos-io/promql-engine/logicalplan"
 	"github.com/thanos-io/promql-engine/query"
 	"google.golang.org/grpc"
 
 	"github.com/thanos-io/thanos/pkg/api/query/querypb"
+	"github.com/thanos-io/thanos/pkg/extpromql"
 	"github.com/thanos-io/thanos/pkg/info/infopb"
 	"github.com/thanos-io/thanos/pkg/store/labelpb"
 )
 
 func TestRemoteEngine_Warnings(t *testing.T) {
+	t.Parallel()
+
 	client := NewClient(&warnClient{}, "", nil)
 	engine := NewRemoteEngine(log.NewNopLogger(), client, Opts{
 		Timeout: 1 * time.Second,
@@ -34,7 +36,7 @@ func TestRemoteEngine_Warnings(t *testing.T) {
 		end   = time.Unix(120, 0)
 		step  = 30 * time.Second
 	)
-	qryExpr, err := parser.ParseExpr("up")
+	qryExpr, err := extpromql.ParseExpr("up")
 	testutil.Ok(t, err)
 
 	plan := logicalplan.NewFromAST(qryExpr, &query.Options{
@@ -61,11 +63,14 @@ func TestRemoteEngine_Warnings(t *testing.T) {
 }
 
 func TestRemoteEngine_LabelSets(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
-		name          string
-		tsdbInfos     []infopb.TSDBInfo
-		replicaLabels []string
-		expected      []labels.Labels
+		name            string
+		tsdbInfos       []infopb.TSDBInfo
+		replicaLabels   []string
+		expected        []labels.Labels
+		partitionLabels []string
 	}{
 		{
 			name:      "empty label sets",
@@ -103,13 +108,24 @@ func TestRemoteEngine_LabelSets(t *testing.T) {
 			replicaLabels: []string{"a", "b"},
 			expected:      []labels.Labels{labels.FromStrings("c", "2")},
 		},
+		{
+			name: "non-empty label sets with partition labels",
+			tsdbInfos: []infopb.TSDBInfo{
+				{
+					Labels: zLabelSetFromStrings("a", "1", "c", "2"),
+				},
+			},
+			partitionLabels: []string{"a"},
+			expected:        []labels.Labels{labels.FromStrings("a", "1")},
+		},
 	}
 
 	for _, testCase := range tests {
 		t.Run(testCase.name, func(t *testing.T) {
 			client := NewClient(nil, "", testCase.tsdbInfos)
 			engine := NewRemoteEngine(log.NewNopLogger(), client, Opts{
-				ReplicaLabels: testCase.replicaLabels,
+				ReplicaLabels:   testCase.replicaLabels,
+				PartitionLabels: testCase.partitionLabels,
 			})
 
 			testutil.Equals(t, testCase.expected, engine.LabelSets())
@@ -118,6 +134,8 @@ func TestRemoteEngine_LabelSets(t *testing.T) {
 }
 
 func TestRemoteEngine_MinT(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name          string
 		tsdbInfos     []infopb.TSDBInfo
