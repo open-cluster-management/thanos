@@ -20,3 +20,13 @@ COPY --from=builder /go/bin/thanos /bin/thanos
 RUN microdnf update -y && microdnf clean all
 
 ENTRYPOINT [ "/bin/thanos" ]
+
+LABEL com.redhat.component="thanos-receive-controller" \
+  name="thanos" \
+  summary="thanos" \
+  io.openshift.expose-services="" \
+  io.openshift.tags="data,images" \
+  io.k8s.display-name="thanos" \
+  maintainer="" \
+  description="thanos" \
+  io.k8s.description="thanos"
