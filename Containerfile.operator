@@ -3,11 +3,14 @@
 
 FROM brew.registry.redhat.io/rh-osbs/openshift-golang-builder:rhel_9_1.21 AS builder
 
-WORKDIR $GOPATH/src/github.com/thanos-io/thanos
+WORKDIR /workspace
+COPY . .
+ 
 
-COPY . $GOPATH/src/github.com/thanos-io/thanos
+RUN cd promu && go build -mod=mod -o /cachi2/output/deps/gomod/bin/promu
 
-RUN git update-index --refresh; make build -f Makefile.rhtap
+WORKDIR /workspace
+RUN go mod vendor && /cachi2/output/deps/gomod/bin/promu build -v --prefix /go/bin/
 
 # -----------------------------------------------------------------------------
 
@@ -16,8 +19,6 @@ FROM registry.access.redhat.com/ubi9/ubi-minimal:latest
 LABEL maintainer="The ACM Thanos maintainers"
 
 COPY --from=builder /go/bin/thanos /bin/thanos
-
-RUN microdnf update -y && microdnf clean all
 
 ENTRYPOINT [ "/bin/thanos" ]
 
